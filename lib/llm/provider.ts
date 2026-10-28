@@ -21,6 +21,27 @@ export const LlmVerdictSchema = z.object({
 });
 export type LlmVerdict = z.infer<typeof LlmVerdictSchema>;
 
+const LlmRequirementBase = z.object({
+  key: z.string().min(1).max(60),
+  label: z.string().min(1).max(120),
+});
+
+export const LlmRequirementsSchema = z.object({
+  useContext: z.string().max(300).nullable().optional(),
+  must: z.array(LlmRequirementBase).max(5).default([]),
+  want: z
+    .array(
+      LlmRequirementBase.extend({
+        importance: z.number().min(0).max(1).catch(0.5),
+      }),
+    )
+    .max(6)
+    .default([]),
+  exclude: z.array(LlmRequirementBase).max(5).default([]),
+  unanswered: z.array(z.string().max(300)).max(3).default([]),
+});
+export type LlmRequirements = z.infer<typeof LlmRequirementsSchema>;
+
 export interface VerdictCandidate {
   id: string;
   title: string;
@@ -34,14 +55,20 @@ export interface VerdictCandidate {
 export interface ExplainVerdictRequest {
   query: string;
   budgetMax?: number;
+  constraints: string[];
   candidates: VerdictCandidate[];
   topReasons: string[];
 }
 
 export interface LlmProvider {
   readonly name: string;
+  readonly available: boolean;
   extractIntent(query: string): Promise<LlmIntent>;
   explainVerdict(request: ExplainVerdictRequest): Promise<LlmVerdict>;
+  extractRequirements(
+    query: string,
+    category: string,
+  ): Promise<LlmRequirements>;
 }
 
 export interface CliLlmOptions {
@@ -84,6 +111,7 @@ function buildVerdictPrompt(request: ExplainVerdictRequest): string {
     "- reason: 1-3 sentences. tradeoffs: honest trade-offs. uncertainties: what could change the verdict.",
     "- Use only the options below. Never invent products, prices, or facts.",
     `Budget max (INR): ${request.budgetMax ?? "none stated"}`,
+    `Hard constraints: ${request.constraints.length > 0 ? request.constraints.join("; ") : "none"}`,
     "Options:",
   ];
   for (const candidate of request.candidates) {
@@ -102,6 +130,25 @@ function buildVerdictPrompt(request: ExplainVerdictRequest): string {
     ' "reason": "...", "tradeoffs": [...], "uncertainties": [...]}',
   );
   return lines.join("\n");
+}
+
+function buildRequirementsPrompt(query: string, category: string): string {
+  return [
+    "You are Wisora's requirement extractor. Read the shopping request and respond",
+    "with ONLY a JSON object, no other text.",
+    "Extract: useContext (activity or purpose if stated, else null), must",
+    '(explicitly required features: "must have", "with X", "needs"), want',
+    '(nice-to-haves and adjectives: "excellent battery", "comfortable") with',
+    "importance 0..1, exclude (explicitly rejected things), unanswered (at most",
+    "2 questions whose answers would materially change the recommendation, else []).",
+    "Rules: keys are lowercase-hyphen slugs. Ground EVERYTHING in the request",
+    "text — never invent requirements, features, or context.",
+    `Category: ${category}`,
+    `Request: ${JSON.stringify(query)}`,
+    'Schema: {"useContext": "string or null", "must": [{"key": "...", "label": "..."}],',
+    ' "want": [{"key": "...", "label": "...", "importance": 0.8}],',
+    ' "exclude": [{"key": "...", "label": "..."}], "unanswered": [...]}',
+  ].join("\n");
 }
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -157,6 +204,10 @@ function runCli(
 export class CliLlmProvider implements LlmProvider {
   readonly name = "muse-exec";
 
+  get available(): boolean {
+    return this.opts.apiKey !== "";
+  }
+
   private readonly opts: CliLlmOptions;
 
   constructor(opts: CliLlmOptions) {
@@ -208,6 +259,15 @@ export class CliLlmProvider implements LlmProvider {
   async explainVerdict(request: ExplainVerdictRequest): Promise<LlmVerdict> {
     return LlmVerdictSchema.parse(
       await this.runPrompt(buildVerdictPrompt(request)),
+    );
+  }
+
+  async extractRequirements(
+    query: string,
+    category: string,
+  ): Promise<LlmRequirements> {
+    return LlmRequirementsSchema.parse(
+      await this.runPrompt(buildRequirementsPrompt(query, category)),
     );
   }
 }

@@ -9,6 +9,7 @@ import {
 } from "react";
 import { SOURCES, type Category } from "../config/sources";
 import type { Intent } from "../lib/intent/types";
+import { normalizeWeights } from "../lib/recommend/weights";
 
 const CATEGORIES: Array<{ id: Category; label: string }> = [
   { id: "electronics", label: "Electronics" },
@@ -63,9 +64,78 @@ interface ScoreReason {
   sentiment: "pro" | "con" | "info";
 }
 
+interface RequirementCheck {
+  key: string;
+  label: string;
+  kind: "must" | "want" | "exclude";
+  status: "met" | "not-met" | "unknown";
+}
+
+interface AttributeEvidence {
+  status: "verified" | "observed" | "missing" | "conflicting";
+  detail?: string;
+  sources: Array<{ url: string; retrievedAt: string }>;
+}
+
+interface ProductEvidence {
+  productId: string;
+  price: AttributeEvidence;
+  rating: AttributeEvidence;
+  specs: AttributeEvidence;
+  identity: AttributeEvidence;
+  stale: boolean;
+}
+
 interface RankedItem {
   product: Product;
-  score: { total: number; reasons: ScoreReason[] };
+  score: {
+    price: number;
+    relevance: number;
+    evidence: number;
+    wants: number;
+    total: number;
+    reasons: ScoreReason[];
+  };
+  analysis: {
+    checks: RequirementCheck[];
+    evidence: ProductEvidence | null;
+  };
+}
+
+interface RequirementItem {
+  key: string;
+  label: string;
+  kind: "must" | "want" | "exclude";
+  importance: number;
+}
+
+interface RequirementSetData {
+  category: string;
+  useContext?: string;
+  must: RequirementItem[];
+  want: RequirementItem[];
+  exclude: RequirementItem[];
+  unanswered: string[];
+}
+
+interface ClarificationQuestion {
+  id: string;
+  prompt: string;
+  options?: string[];
+  freeText: boolean;
+}
+
+interface RequirementsResponse {
+  requirements: RequirementSetData;
+  questions: ClarificationQuestion[];
+  suggestedCategory: string | null;
+}
+
+interface ExcludedItem {
+  productId: string;
+  title: string;
+  merchant: string;
+  reasons: string[];
 }
 
 interface SourceStatus {
@@ -84,7 +154,7 @@ interface SearchData {
 }
 
 interface Recommendation {
-  verdict: "BUY" | "WAIT" | "AVOID" | "NEEDS_MORE_INFO";
+  verdict: "BUY" | "WAIT" | "AVOID" | "INSUFFICIENT_EVIDENCE" | "NEEDS_CLARIFICATION";
   productId?: string;
   reason: string;
   tradeoffs: string[];
@@ -94,11 +164,16 @@ interface Recommendation {
 
 interface VerdictData {
   ranked: RankedItem[];
+  excluded: ExcludedItem[];
+  excludedByBudget: number;
   recommendation: Recommendation;
   reasoningUsed: "llm" | "rules";
   statuses: SourceStatus[];
   searchedAt: string;
   warnings: string[];
+  requirements: RequirementSetData;
+  confidence: { score: number; level: string; gaps: string[] };
+  runnerUpDiff: string[];
 }
 
 function formatInr(value: number): string {
@@ -118,6 +193,20 @@ function categoryLabel(id: Category): string {
 }
 
 const MAX_COMPARE = 4;
+
+const DEFAULT_WEIGHT_STATE = {
+  price: 35,
+  relevance: 30,
+  evidence: 20,
+  wants: 15,
+};
+
+const WEIGHT_LABELS: Record<keyof typeof DEFAULT_WEIGHT_STATE, string> = {
+  price: "Price fit",
+  relevance: "Relevance",
+  evidence: "Evidence",
+  wants: "Preferences",
+};
 
 interface VoiceRecognition extends EventTarget {
   lang: string;
@@ -213,6 +302,47 @@ function ScoreMeter({ total }: { total: number }) {
   );
 }
 
+function BreakdownBars({
+  score,
+}: {
+  score: { price: number; relevance: number; evidence: number; wants: number };
+}) {
+  const rows: Array<[string, number, string]> = [
+    ["Price", score.price, "bg-teal-300"],
+    ["Relevance", score.relevance, "bg-sky-300"],
+    ["Evidence", score.evidence, "bg-amber-300"],
+    ["Prefs", score.wants, "bg-violet-300"],
+  ];
+  const max = Math.max(
+    1,
+    score.price,
+    score.relevance,
+    score.evidence,
+    score.wants,
+  );
+  return (
+    <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1">
+      {rows.map(([label, value, bar]) => (
+        <div
+          key={label}
+          className="flex items-center gap-2 text-xs text-stone-500"
+        >
+          <dt className="w-14 shrink-0">{label}</dt>
+          <dd className="flex flex-1 items-center gap-1.5">
+            <span className="h-1 flex-1 overflow-hidden rounded-full bg-white/10">
+              <span
+                className={`block h-full rounded-full ${bar}`}
+                style={{ width: `${(value / max) * 100}%` }}
+              />
+            </span>
+            <span className="w-6 text-right text-stone-400">{value}</span>
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 function ProductImage({ url, merchant }: { url?: string; merchant: string }) {
   const [failed, setFailed] = useState(false);
   if (!url || failed) {
@@ -250,6 +380,13 @@ export default function Home() {
   const [verdict, setVerdict] = useState<VerdictData | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [verdictError, setVerdictError] = useState<string | null>(null);
+  const [reqs, setReqs] = useState<RequirementsResponse | null>(null);
+  const [reqsLoading, setReqsLoading] = useState(false);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [answering, setAnswering] = useState(false);
+  const [weights, setWeights] = useState({ ...DEFAULT_WEIGHT_STATE });
+  const [allowOverBudget, setAllowOverBudget] = useState(false);
+  const [recalcLoading, setRecalcLoading] = useState(false);
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [showCompare, setShowCompare] = useState(false);
   const [listening, setListening] = useState(false);
@@ -307,6 +444,7 @@ export default function Home() {
   const cards: Array<{
     product: Product;
     score: RankedItem["score"] | null;
+    analysis: RankedItem["analysis"];
   }> = useMemo(() => {
     if (!verdict) {
       return [];
@@ -318,7 +456,15 @@ export default function Home() {
     () =>
       compareIds
         .map((id) => cards.find((c) => c.product.id === id))
-        .filter((c): c is { product: Product; score: RankedItem["score"] | null } => c != null),
+        .filter(
+          (
+            c,
+          ): c is {
+            product: Product;
+            score: RankedItem["score"] | null;
+            analysis: RankedItem["analysis"];
+          } => c != null,
+        ),
     [compareIds, cards],
   );
 
@@ -343,6 +489,10 @@ export default function Home() {
     setError(null);
     setResult(null);
     setOverride(null);
+    setReqs(null);
+    setAnswers({});
+    setWeights({ ...DEFAULT_WEIGHT_STATE });
+    setAllowOverBudget(false);
     clearDownstream();
     try {
       const response = await fetch("/api/intent", {
@@ -355,6 +505,26 @@ export default function Home() {
       }
       const data = (await response.json()) as IntentResponse;
       setResult(data);
+      setReqsLoading(true);
+      try {
+        const reqResponse = await fetch("/api/requirements", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: data.intent.query,
+            intent: data.intent,
+          }),
+        });
+        if (reqResponse.ok) {
+          const reqData =
+            (await reqResponse.json()) as RequirementsResponse;
+          setReqs(reqData);
+        }
+      } catch {
+        // Search still works without extracted requirements.
+      } finally {
+        setReqsLoading(false);
+      }
     } catch {
       setError("Could not analyze that request. Please try again.");
     } finally {
@@ -426,6 +596,90 @@ export default function Home() {
     recognition.start();
   }
 
+  async function submitAnswers(): Promise<void> {
+    if (!result || !reqs || answering) {
+      return;
+    }
+    const payload = reqs.questions
+      .map((q) => ({ questionId: q.id, value: (answers[q.id] ?? "").trim() }))
+      .filter((a) => a.value.length > 0);
+    if (payload.length !== reqs.questions.length) {
+      return;
+    }
+    setAnswering(true);
+    try {
+      const response = await fetch("/api/requirements", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: result.intent.query,
+          intent: result.intent,
+          answers: payload,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`requirements failed (${response.status})`);
+      }
+      const data = (await response.json()) as RequirementsResponse;
+      setReqs(data);
+      setAnswers({});
+      const match = CATEGORIES.find((c) => c.id === data.suggestedCategory);
+      if (match && match.id !== effectiveCategory) {
+        setOverride(match.id);
+        clearDownstream();
+      }
+    } catch {
+      setError("Could not update requirements. Please try again.");
+    } finally {
+      setAnswering(false);
+    }
+  }
+
+  async function recalc(next?: {
+    weights?: typeof weights;
+    allowOverBudget?: boolean;
+  }): Promise<void> {
+    if (!result || !search || !effectiveCategory || recalcLoading) {
+      return;
+    }
+    const w = normalizeWeights(next?.weights ?? weights);
+    const over = next?.allowOverBudget ?? allowOverBudget;
+    setWeights(w);
+    setAllowOverBudget(over);
+    setRecalcLoading(true);
+    setVerdictError(null);
+    try {
+      const response = await fetch("/api/recommend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: result.intent.query,
+          category: effectiveCategory,
+          intent: result.intent,
+          requirements: reqs?.requirements,
+          weights: w,
+          allowOverBudget: over,
+          products: search.products,
+          statuses: search.statuses,
+          searchedAt: search.searchedAt,
+        }),
+      });
+      const data = (await response.json()) as VerdictData & { error?: string };
+      if (!response.ok) {
+        throw new Error(data.error ?? `recalculation failed (${response.status})`);
+      }
+      setVerdict(data);
+      setCompareIds([]);
+      setShowCompare(false);
+    } catch (e) {
+      setVerdictError(
+        e instanceof Error ? e.message : "Recalculation failed. Please try again.",
+      );
+    } finally {
+      setRecalcLoading(false);
+    }
+  }
+
   async function runSearch(): Promise<void> {
     if (!result || !effectiveCategory || stage === "searching" || stage === "recommending") {
       return;
@@ -464,6 +718,9 @@ export default function Home() {
           query: result.intent.query,
           category: effectiveCategory,
           intent: result.intent,
+          requirements: reqs?.requirements,
+          weights: normalizeWeights(weights),
+          allowOverBudget,
           products: searchData.products,
           statuses: searchData.statuses,
           searchedAt: searchData.searchedAt,
@@ -537,13 +794,17 @@ export default function Home() {
         return "bg-amber-300 text-amber-950";
       case "AVOID":
         return "bg-red-400 text-red-950";
+      case "INSUFFICIENT_EVIDENCE":
+        return "bg-violet-300 text-violet-950";
+      case "NEEDS_CLARIFICATION":
+        return "bg-sky-300 text-sky-950";
       default:
         return "border border-white/15 bg-white/10 text-stone-200";
     }
   };
 
   const verdictLabel = (v: Recommendation["verdict"]): string =>
-    v === "NEEDS_MORE_INFO" ? "NEEDS MORE INFO" : v;
+    v.replace(/_/g, " ");
 
   const verdictProduct =
     verdict?.recommendation.productId != null
@@ -784,6 +1045,123 @@ export default function Home() {
               )}
             </fieldset>
 
+            <div className="mt-4">
+              {reqsLoading && (
+                <p className="text-sm text-stone-500">
+                  Understanding requirements…
+                </p>
+              )}
+              {reqs &&
+                (reqs.requirements.useContext != null ||
+                  reqs.requirements.must.length > 0 ||
+                  reqs.requirements.want.length > 0 ||
+                  reqs.requirements.exclude.length > 0) && (
+                  <div>
+                    <h3 className="text-sm font-medium text-stone-200">
+                      Requirements
+                    </h3>
+                    {reqs.requirements.useContext && (
+                      <p className="mt-1 text-sm text-stone-400">
+                        Use: {reqs.requirements.useContext}
+                      </p>
+                    )}
+                    <ul className="mt-2 flex flex-wrap gap-1.5 text-xs">
+                      {reqs.requirements.must.map((r) => (
+                        <li
+                          key={r.key}
+                          className="rounded-full border border-teal-300/30 bg-teal-300/10 px-2.5 py-1 text-teal-200"
+                        >
+                          Must: {r.label}
+                        </li>
+                      ))}
+                      {reqs.requirements.want.map((r) => (
+                        <li
+                          key={r.key}
+                          className="rounded-full border border-sky-300/30 bg-sky-300/10 px-2.5 py-1 text-sky-200"
+                        >
+                          Want: {r.label}
+                        </li>
+                      ))}
+                      {reqs.requirements.exclude.map((r) => (
+                        <li
+                          key={r.key}
+                          className="rounded-full border border-rose-300/30 bg-rose-300/10 px-2.5 py-1 text-rose-200"
+                        >
+                          Avoid: {r.label}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              {reqs && reqs.questions.length > 0 && (
+                <div className="mt-3 rounded-xl border border-sky-300/25 bg-sky-400/5 p-4">
+                  <h3 className="text-sm font-semibold text-sky-200">
+                    Quick questions
+                  </h3>
+                  {reqs.questions.map((q) => (
+                    <div key={q.id} className="mt-3">
+                      <p className="text-sm font-medium text-stone-200">
+                        {q.prompt}
+                      </p>
+                      {q.options ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {q.options.map((opt) => {
+                            const active = answers[q.id] === opt;
+                            return (
+                              <button
+                                key={opt}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() =>
+                                  setAnswers((prev) => ({
+                                    ...prev,
+                                    [q.id]: opt,
+                                  }))
+                                }
+                                className={
+                                  active
+                                    ? "rounded-full bg-sky-300 px-3 py-1.5 text-xs font-semibold text-sky-950"
+                                    : "rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-stone-300 hover:border-white/30"
+                                }
+                              >
+                                {opt}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <input
+                          type="text"
+                          value={answers[q.id] ?? ""}
+                          onChange={(event) =>
+                            setAnswers((prev) => ({
+                              ...prev,
+                              [q.id]: event.target.value,
+                            }))
+                          }
+                          placeholder="Type your answer"
+                          className="mt-2 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-sky-300/60 focus:ring-2 focus:ring-sky-300/20 focus:outline-none"
+                        />
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => void submitAnswers()}
+                    disabled={
+                      answering ||
+                      reqs.questions.some(
+                        (q) => !(answers[q.id] ?? "").trim(),
+                      )
+                    }
+                    className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-sky-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {answering ? "Updating…" : "Update requirements"}
+                  </button>
+                </div>
+              )}
+            </div>
+
             <div className="mt-5 border-t border-white/10 pt-4">
               <button
                 type="button"
@@ -929,6 +1307,43 @@ export default function Home() {
                 </ul>
               </div>
             )}
+            <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <p className="text-sm text-stone-300">
+                Evidence confidence:{" "}
+                <strong className="text-stone-100">
+                  {verdict.confidence.score}/100 ({verdict.confidence.level})
+                </strong>
+              </p>
+              <div
+                className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10"
+                role="img"
+                aria-label={`Evidence confidence ${verdict.confidence.score} out of 100`}
+              >
+                <div
+                  className="h-full rounded-full bg-teal-300"
+                  style={{ width: `${verdict.confidence.score}%` }}
+                />
+              </div>
+              {verdict.confidence.gaps.length > 0 && (
+                <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-stone-500">
+                  {verdict.confidence.gaps.map((gap) => (
+                    <li key={gap}>{gap}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            {verdict.runnerUpDiff.length > 0 && (
+              <div className="mt-3">
+                <h3 className="text-sm font-semibold text-stone-200">
+                  Why this won
+                </h3>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-stone-400">
+                  {verdict.runnerUpDiff.map((d) => (
+                    <li key={d}>{d}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </section>
         )}
 
@@ -956,6 +1371,90 @@ export default function Home() {
                 {warning}
               </p>
             ))}
+            {verdict.excludedByBudget > 0 && (
+              <label className="mt-3 flex cursor-pointer items-center gap-2.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm transition hover:border-white/25">
+                <input
+                  type="checkbox"
+                  checked={allowOverBudget}
+                  disabled={recalcLoading}
+                  onChange={() =>
+                    void recalc({ allowOverBudget: !allowOverBudget })
+                  }
+                  className="h-4 w-4 accent-teal-300"
+                />
+                <span className="text-stone-300">
+                  Include near-budget options (up to 25% over)
+                </span>
+              </label>
+            )}
+            {verdict.excluded.length > 0 && (
+              <details className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <summary className="cursor-pointer text-sm font-medium text-stone-300">
+                  {verdict.excluded.length} option
+                  {verdict.excluded.length === 1 ? "" : "s"} excluded — why?
+                </summary>
+                <ul className="mt-2 space-y-2 text-sm">
+                  {verdict.excluded.map((entry) => (
+                    <li key={entry.productId}>
+                      <p className="text-stone-200">
+                        {entry.title}{" "}
+                        <span className="text-xs text-stone-500">
+                          · {entry.merchant}
+                        </span>
+                      </p>
+                      <ul className="list-disc space-y-0.5 pl-5 text-stone-500">
+                        {entry.reasons.map((reason) => (
+                          <li key={reason}>{reason}</li>
+                        ))}
+                      </ul>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            <details className="glass mt-3 rounded-xl p-4">
+              <summary className="cursor-pointer text-sm font-semibold text-stone-200">
+                Adjust scoring weights
+              </summary>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {(Object.keys(weights) as Array<keyof typeof weights>).map(
+                  (key) => (
+                    <label key={key} className="block text-xs text-stone-400">
+                      <span className="flex justify-between">
+                        <span>{WEIGHT_LABELS[key]}</span>
+                        <span className="text-stone-200">{weights[key]}</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={weights[key]}
+                        onChange={(event) =>
+                          setWeights((prev) => ({
+                            ...prev,
+                            [key]: Number(event.target.value),
+                          }))
+                        }
+                        className="w-full accent-teal-300"
+                      />
+                    </label>
+                  ),
+                )}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void recalc()}
+                  disabled={recalcLoading}
+                  className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {recalcLoading ? "Recalculating…" : "Recalculate scores"}
+                </button>
+                <span className="text-xs text-stone-500">
+                  Weights are scaled to sum to 100. No new search needed.
+                </span>
+              </div>
+            </details>
 
             {compareIds.length > 0 && (
               <div className="glass sticky bottom-4 z-10 mt-4 flex flex-wrap items-center gap-3 rounded-2xl px-4 py-2.5">
@@ -1112,7 +1611,7 @@ export default function Home() {
               </div>
             ) : (
               <ul className="mt-3 space-y-3">
-                {cards.map(({ product: p, score }, index) => {
+                {cards.map(({ product: p, score, analysis }, index) => {
                   const pros = (score?.reasons ?? []).filter(
                     (r) => r.sentiment === "pro",
                   );
@@ -1181,6 +1680,47 @@ export default function Home() {
                       {p.snippet && (
                         <p className="mt-2 line-clamp-3 text-sm text-stone-500">
                           {p.snippet}
+                        </p>
+                      )}
+                      {score && <BreakdownBars score={score} />}
+                      {analysis.checks.length > 0 && (
+                        <ul className="mt-2 flex flex-wrap gap-1.5 text-xs">
+                          {analysis.checks.map((check) => (
+                            <li
+                              key={check.key}
+                              title={`${check.kind}: ${check.status}`}
+                              className={
+                                check.status === "met"
+                                  ? "rounded-full border border-teal-300/30 bg-teal-300/10 px-2 py-0.5 text-teal-200"
+                                  : check.status === "not-met"
+                                    ? "rounded-full border border-rose-300/30 bg-rose-300/10 px-2 py-0.5 text-rose-200"
+                                    : "rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-stone-400"
+                              }
+                            >
+                              {check.status === "met"
+                                ? "✓"
+                                : check.status === "not-met"
+                                  ? "✗"
+                                  : "?"}{" "}
+                              {check.label}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {analysis.evidence?.price.status === "conflicting" && (
+                        <p className="mt-2 text-xs text-rose-300">
+                          ⚠ {analysis.evidence.price.detail}
+                        </p>
+                      )}
+                      {analysis.evidence?.rating.status === "conflicting" && (
+                        <p className="mt-1 text-xs text-rose-300">
+                          ⚠ {analysis.evidence.rating.detail}
+                        </p>
+                      )}
+                      {analysis.evidence?.stale && (
+                        <p className="mt-1 text-xs text-amber-200/80">
+                          Listing data may be stale — verify on the
+                          retailer&apos;s page.
                         </p>
                       )}
                       {(pros.length > 0 || cons.length > 0) && (

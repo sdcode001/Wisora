@@ -1,5 +1,10 @@
+import { matchRequirement } from "../eligibility/filter";
 import type { Intent } from "../intent/types";
 import type { Product } from "../products/schema";
+import type { RequirementSet } from "../requirements/types";
+import { contentTokens } from "../text/tokens";
+import { formatInr } from "../text/format";
+import { DEFAULT_WEIGHTS, type ScoreWeights } from "./weights";
 
 export type ReasonSentiment = "pro" | "con" | "info";
 
@@ -12,6 +17,7 @@ export interface ScoreBreakdown {
   price: number;
   relevance: number;
   evidence: number;
+  wants: number;
   total: number;
   reasons: ScoreReason[];
 }
@@ -21,29 +27,7 @@ export interface RankedProduct {
   score: ScoreBreakdown;
 }
 
-const STOPWORDS = new Set([
-  "for", "and", "the", "with", "under", "from", "that", "this", "your",
-  "you", "are", "without", "compare", "find", "suggest", "best", "good",
-  "great", "excellent", "suitable", "simple", "daily", "routine",
-  "comfortable", "products", "product", "options", "option", "around",
-  "about", "budget", "between",
-]);
-
-export function formatInr(value: number): string {
-  return `₹${value.toLocaleString("en-IN")}`;
-}
-
-function contentTokens(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((word) => word.length > 2 && !STOPWORDS.has(word)),
-  );
-}
-
-function scorePrice(
+function scorePriceFraction(
   product: Product,
   intent: Intent,
   reasons: ScoreReason[],
@@ -54,56 +38,120 @@ function scorePrice(
       text: "No verified price — confirm on the retailer's page.",
       sentiment: "info",
     });
-    return 15;
+    return 0.375;
   }
   if (max == null) {
     reasons.push({
       text: `Listed at ${formatInr(product.priceInr)} (no budget stated).`,
       sentiment: "info",
     });
-    return 30;
+    return 0.75;
   }
   if (product.priceInr <= max) {
     reasons.push({
       text: `${formatInr(product.priceInr)} fits your ${formatInr(max)} budget.`,
       sentiment: "pro",
     });
-    return 40;
+    return 1;
   }
   const overrun = (product.priceInr - max) / max;
   reasons.push({
     text: `${formatInr(product.priceInr)} exceeds your ${formatInr(max)} budget by ${formatInr(product.priceInr - max)}.`,
     sentiment: "con",
   });
-  return Math.max(0, Math.round(40 * (1 - overrun)));
+  return Math.max(0, 1 - overrun);
 }
 
-function scoreEvidence(product: Product, reasons: ScoreReason[]): number {
+function scoreEvidenceFraction(
+  product: Product,
+  reasons: ScoreReason[],
+): number {
   if (product.priceEvidence === "repeated") {
     reasons.push({
       text: "Price corroborated across the retailer's page.",
       sentiment: "pro",
     });
-    return 20;
+    return 1;
   }
   if (product.priceEvidence === "single") {
     reasons.push({
       text: "Price seen only once — treat as unverified until confirmed.",
       sentiment: "con",
     });
-    return 10;
+    return 0.5;
   }
   return 0;
+}
+
+function scoreWantsFraction(
+  product: Product,
+  requirements: RequirementSet | undefined,
+  reasons: ScoreReason[],
+): number {
+  const wants = requirements?.want ?? [];
+  if (wants.length === 0) {
+    reasons.push({
+      text: "No optional preferences stated.",
+      sentiment: "info",
+    });
+    return 1;
+  }
+  const text = `${product.title} ${product.snippet}`;
+  let matched = 0;
+  let total = 0;
+  const matchedLabels: string[] = [];
+  let firstMissed: string | null = null;
+  for (const want of wants) {
+    total += want.importance;
+    if (matchRequirement(want, text) === "met") {
+      matched += want.importance;
+      if (matchedLabels.length < 2) {
+        matchedLabels.push(want.label);
+      }
+    } else if (!firstMissed) {
+      firstMissed = want.label;
+    }
+  }
+  for (const label of matchedLabels) {
+    reasons.push({ text: `Matches preference: ${label}.`, sentiment: "pro" });
+  }
+  if (firstMissed) {
+    reasons.push({
+      text: `Missing preference: ${firstMissed}.`,
+      sentiment: "info",
+    });
+  }
+  return total > 0 ? matched / total : 1;
 }
 
 export function scoreProducts(
   products: Product[],
   intent: Intent,
+  requirements?: RequirementSet,
+  weights: ScoreWeights = DEFAULT_WEIGHTS,
 ): RankedProduct[] {
-  const queryTokens = contentTokens(intent.searchTerms);
+  const requirementTokens = new Set<string>();
+  if (requirements) {
+    for (const req of [
+      ...requirements.must,
+      ...requirements.want,
+      ...requirements.exclude,
+    ]) {
+      for (const token of contentTokens(req.label)) {
+        requirementTokens.add(token);
+      }
+    }
+  }
+  const queryTokens = new Set(
+    [...contentTokens(intent.searchTerms)].filter(
+      (token) => !requirementTokens.has(token),
+    ),
+  );
   const ranked: RankedProduct[] = products.map((product) => {
     const reasons: ScoreReason[] = [];
-    const price = scorePrice(product, intent, reasons);
+    const price = Math.round(
+      scorePriceFraction(product, intent, reasons) * weights.price,
+    );
     const haystack = contentTokens(`${product.title} ${product.snippet}`);
     let hits = 0;
     for (const token of queryTokens) {
@@ -112,15 +160,21 @@ export function scoreProducts(
       }
     }
     const recall = queryTokens.size === 0 ? 0.5 : hits / queryTokens.size;
-    const relevance = Math.round(recall * 40);
-    const evidence = scoreEvidence(product, reasons);
+    const relevance = Math.round(recall * weights.relevance);
+    const evidence = Math.round(
+      scoreEvidenceFraction(product, reasons) * weights.evidence,
+    );
+    const wants = Math.round(
+      scoreWantsFraction(product, requirements, reasons) * weights.wants,
+    );
     return {
       product,
       score: {
         price,
         relevance,
         evidence,
-        total: price + relevance + evidence,
+        wants,
+        total: price + relevance + evidence + wants,
         reasons,
       },
     };
@@ -132,4 +186,25 @@ export function scoreProducts(
       b.product.score - a.product.score,
   );
   return ranked;
+}
+
+export function describeRankingGap(
+  first: RankedProduct,
+  second: RankedProduct,
+): string[] {
+  const deltas = (
+    [
+      ["Price fit", first.score.price - second.score.price],
+      ["Relevance", first.score.relevance - second.score.relevance],
+      ["Evidence", first.score.evidence - second.score.evidence],
+      ["Preferences", first.score.wants - second.score.wants],
+    ] as Array<[string, number]>
+  )
+    .filter(([, delta]) => delta > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2);
+  if (deltas.length === 0) {
+    return ["Options scored nearly identically — compare details below."];
+  }
+  return deltas.map(([label, delta]) => `${label} +${delta} for the top pick.`);
 }

@@ -27,6 +27,12 @@ export const ProductSchema = z.object({
 });
 export type Product = z.infer<typeof ProductSchema>;
 
+export interface ConflictRecord {
+  productId: string;
+  field: "price" | "rating";
+  values: number[];
+}
+
 export function normalizeUrl(url: string): string {
   try {
     const parsed = new URL(url);

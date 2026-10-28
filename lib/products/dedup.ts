@@ -1,4 +1,4 @@
-import type { Product } from "./schema";
+import type { ConflictRecord, Product } from "./schema";
 
 export function normalizeTitle(title: string): string {
   return title
@@ -8,16 +8,60 @@ export function normalizeTitle(title: string): string {
     .trim();
 }
 
+function evidenceTier(product: Product): number {
+  return product.priceEvidence === "repeated"
+    ? 2
+    : product.priceEvidence === "single"
+      ? 1
+      : 0;
+}
+
+function betterOf(a: Product, b: Product): Product {
+  const tier = evidenceTier(b) - evidenceTier(a);
+  if (tier !== 0) {
+    return tier > 0 ? b : a;
+  }
+  return b.score > a.score ? b : a;
+}
+
 export function dedupeProducts(products: Product[]): {
   products: Product[];
   removed: number;
+  conflicts: ConflictRecord[];
 } {
   const byId = new Map<string, Product>();
+  const conflicts: ConflictRecord[] = [];
   for (const product of products) {
     const existing = byId.get(product.id);
-    if (!existing || product.score > existing.score) {
+    if (!existing) {
       byId.set(product.id, product);
+      continue;
     }
+    if (
+      existing.priceInr != null &&
+      product.priceInr != null &&
+      existing.priceInr !== product.priceInr
+    ) {
+      conflicts.push({
+        productId: product.id,
+        field: "price",
+        values: [existing.priceInr, product.priceInr].sort((a, b) => a - b),
+      });
+    }
+    const existingRating = existing.rating?.value;
+    const rating = product.rating?.value;
+    if (
+      existingRating != null &&
+      rating != null &&
+      existingRating !== rating
+    ) {
+      conflicts.push({
+        productId: product.id,
+        field: "rating",
+        values: [existingRating, rating].sort((a, b) => a - b),
+      });
+    }
+    byId.set(product.id, betterOf(existing, product));
   }
   let removed = products.length - byId.size;
   const seen = new Map<string, Product>();
@@ -30,5 +74,5 @@ export function dedupeProducts(products: Product[]): {
       removed += 1;
     }
   }
-  return { products: [...seen.values()], removed };
+  return { products: [...seen.values()], removed, conflicts };
 }

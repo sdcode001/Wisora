@@ -1,110 +1,230 @@
-import { expect, test } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { Intent } from "../intent/types";
 import type { Product } from "../products/schema";
-import { scoreProducts } from "./score";
+import type { RankedProduct } from "./score";
 import { deterministicVerdict, validateLlmVerdict } from "./verdict";
 
-const intent: Intent = {
-  query: "Find a laptop under 90000 for development",
-  category: "electronics",
-  categoryConfidence: "high",
-  budgetInr: { max: 90000 },
-  searchTerms: "laptop development",
-};
+const SEEN_AT = "2026-10-27T00:00:00.000Z";
 
-const mk = (over: Partial<Product> & { id: string }): Product => ({
-  title: "Laptop",
-  url: `https://www.amazon.in/dp/${over.id}`,
-  sourceId: "amazon-in",
-  merchant: "Amazon India",
-  snippet: "",
-  score: 0.5,
-  retrievedAt: "t",
-  ...over,
-});
+function product(overrides: Partial<Product> = {}): Product {
+  return {
+    id: "p1",
+    sourceId: "amazon-in",
+    title: "Test Laptop 16GB",
+    url: "https://www.amazon.in/dp/B0TEST1",
+    merchant: "Amazon India",
+    snippet: "A test laptop.",
+    priceInr: 45000,
+    priceEvidence: "repeated",
+    rating: { value: 4.3, count: 1200, seenAt: SEEN_AT },
+    score: 40,
+    retrievedAt: SEEN_AT,
+    ...overrides,
+  };
+}
 
-const fit = mk({
-  id: "a1",
-  title: "Laptop Pro 16GB for development",
-  priceInr: 85000,
-  priceEvidence: "repeated",
-  snippet: "laptop development machine",
-  score: 0.9,
-});
-const over = mk({
-  id: "b2",
-  title: "Laptop Ultra 32GB development",
-  priceInr: 120000,
-  priceEvidence: "repeated",
-  snippet: "laptop",
-  score: 0.95,
-});
-
-test("ranking prefers in-budget evidence-backed options", () => {
-  const ranked = scoreProducts([over, fit], intent);
-  expect(ranked.map((r) => r.product.id)).toEqual(["a1", "b2"]);
-  expect(ranked[0]?.score.total).toBeGreaterThan(ranked[1]?.score.total ?? 0);
-});
-
-test("deterministic verdicts never force a recommendation", () => {
-  expect(deterministicVerdict([], intent).verdict).toBe("NEEDS_MORE_INFO");
-
-  const ranked = scoreProducts([over, fit], intent);
-  const buy = deterministicVerdict(ranked, intent);
-  expect(buy.verdict).toBe("BUY");
-  expect(buy.productId).toBe("a1");
-
-  const onlyOver = scoreProducts([over], intent);
-  expect(deterministicVerdict(onlyOver, intent).verdict).toBe("AVOID");
-
-  const unpriced = scoreProducts(
-    [mk({ id: "c3", title: "Laptop Basic development", snippet: "laptop" })],
-    intent,
-  );
-  expect(deterministicVerdict(unpriced, intent).verdict).toBe("NEEDS_MORE_INFO");
-});
-
-test("LLM verdicts are validated against verified results", () => {
-  const ranked = scoreProducts([over, fit], intent);
-
-  const good = validateLlmVerdict(
-    {
-      verdict: "BUY",
-      productId: "a1",
-      reason: "Fits budget with strong evidence across options.",
-      tradeoffs: [],
-      uncertainties: [],
+function ranked(entry: Product, total: number): RankedProduct {
+  return {
+    product: entry,
+    score: {
+      price: 0,
+      relevance: 0,
+      evidence: 0,
+      wants: 0,
+      total,
+      reasons: [],
     },
-    ranked,
-    intent,
-  );
-  expect(good.verdict).toBe("BUY");
-  expect(good.source).toBe("llm");
+  };
+}
 
-  const ghost = validateLlmVerdict(
-    {
-      verdict: "BUY",
-      productId: "ghost",
-      reason: "Hallucinated pick with sufficient length here.",
-      tradeoffs: [],
-      uncertainties: [],
-    },
-    ranked,
-    intent,
-  );
-  expect(ghost.verdict).toBe("NEEDS_MORE_INFO");
+function intent(overrides: Partial<Intent> = {}): Intent {
+  return {
+    query: "laptop under 50000",
+    category: "electronics",
+    categoryConfidence: "high",
+    searchTerms: "laptop",
+    budgetInr: { max: 50000 },
+    ...overrides,
+  };
+}
 
-  const veto = validateLlmVerdict(
-    {
-      verdict: "BUY",
-      productId: "b2",
-      reason: "LLM missed the budget overrun in this long reason.",
-      tradeoffs: [],
-      uncertainties: [],
-    },
-    ranked,
-    intent,
-  );
-  expect(veto.verdict).toBe("AVOID");
-  expect(veto.source).toBe("rules");
+describe("deterministicVerdict", () => {
+  it("abstains when no listings exist", () => {
+    const rec = deterministicVerdict([], intent());
+    expect(rec.verdict).toBe("INSUFFICIENT_EVIDENCE");
+    expect(rec.reason).toContain("nothing to recommend");
+  });
+
+  it("abstains when the top price cannot be verified", () => {
+    const rec = deterministicVerdict(
+      [
+        ranked(
+          product({ priceInr: undefined, priceEvidence: undefined }),
+          40,
+        ),
+      ],
+      intent(),
+    );
+    expect(rec.verdict).toBe("INSUFFICIENT_EVIDENCE");
+    expect(rec.reason).toContain("closest match");
+  });
+
+  it("asks for clarification when slightly over budget", () => {
+    const rec = deterministicVerdict(
+      [ranked(product({ priceInr: 60000 }), 90)],
+      intent(),
+    );
+    expect(rec.verdict).toBe("NEEDS_CLARIFICATION");
+    expect(rec.reason).toContain("over your");
+  });
+
+  it("avoids when far over budget", () => {
+    const rec = deterministicVerdict(
+      [ranked(product({ priceInr: 80000 }), 90)],
+      intent(),
+    );
+    expect(rec.verdict).toBe("AVOID");
+    expect(rec.productId).toBe("p1");
+  });
+
+  it("buys a verified in-budget top pick", () => {
+    const rec = deterministicVerdict([ranked(product(), 95)], intent());
+    expect(rec.verdict).toBe("BUY");
+    expect(rec.reason).toContain("Test Laptop 16GB");
+  });
+
+  it("flags single-sighting prices on a BUY", () => {
+    const rec = deterministicVerdict(
+      [ranked(product({ priceEvidence: "single" }), 90)],
+      intent(),
+    );
+    expect(rec.verdict).toBe("BUY");
+    expect(rec.uncertainties.some((u) => u.includes("seen once"))).toBe(true);
+  });
+});
+
+describe("validateLlmVerdict", () => {
+  const rankedList = [ranked(product(), 95)];
+
+  it("discards suggestions outside the verified results", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        productId: "ghost",
+        reason: "Trust me.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      rankedList,
+      intent(),
+    );
+    expect(rec.verdict).toBe("INSUFFICIENT_EVIDENCE");
+    expect(rec.source).toBe("rules");
+  });
+
+  it("discards BUY suggestions with no verifiable option", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        reason: "Buy something.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      rankedList,
+      intent(),
+    );
+    expect(rec.verdict).toBe("INSUFFICIENT_EVIDENCE");
+  });
+
+  it("discards BUY suggestions whose price is unverified", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        productId: "p1",
+        reason: "Great deal.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      [
+        ranked(
+          product({ priceInr: undefined, priceEvidence: undefined }),
+          90,
+        ),
+      ],
+      intent(),
+    );
+    expect(rec.verdict).toBe("INSUFFICIENT_EVIDENCE");
+  });
+
+  it("vetoes non-AVOID suggestions far over budget", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        productId: "p1",
+        reason: "Great deal.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      [ranked(product({ priceInr: 80000 }), 90)],
+      intent(),
+    );
+    expect(rec.verdict).toBe("AVOID");
+    expect(rec.source).toBe("rules");
+    expect(rec.reason).toContain("Vetoed");
+  });
+
+  it("accepts a grounded BUY as-is", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        productId: "p1",
+        reason: "Solid pick.",
+        tradeoffs: ["Heavier than rivals."],
+        uncertainties: [],
+      },
+      rankedList,
+      intent(),
+    );
+    expect(rec.verdict).toBe("BUY");
+    expect(rec.source).toBe("llm");
+    expect(rec.tradeoffs).toEqual(["Heavier than rivals."]);
+  });
+
+  it("passes AVOID through", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "AVOID",
+        productId: "p1",
+        reason: "Poor ratings.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      rankedList,
+      intent(),
+    );
+    expect(rec.verdict).toBe("AVOID");
+    expect(rec.source).toBe("llm");
+  });
+
+  it("passes WAIT through with a thin-price note when priceless", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "WAIT",
+        productId: "p1",
+        reason: "Wait for verification.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      [
+        ranked(
+          product({ priceInr: undefined, priceEvidence: undefined }),
+          90,
+        ),
+      ],
+      intent(),
+    );
+    expect(rec.verdict).toBe("WAIT");
+    expect(rec.source).toBe("llm");
+    expect(rec.uncertainties.some((u) => u.includes("thin"))).toBe(true);
+  });
 });

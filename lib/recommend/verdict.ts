@@ -1,7 +1,13 @@
 import type { Intent } from "../intent/types";
-import { formatInr, type RankedProduct } from "./score";
+import type { RankedProduct } from "./score";
+import { formatInr } from "../text/format";
 
-export type Verdict = "BUY" | "WAIT" | "AVOID" | "NEEDS_MORE_INFO";
+export type Verdict =
+  | "BUY"
+  | "WAIT"
+  | "AVOID"
+  | "INSUFFICIENT_EVIDENCE"
+  | "NEEDS_CLARIFICATION";
 
 export interface Recommendation {
   verdict: Verdict;
@@ -23,12 +29,13 @@ export interface LlmVerdictInput {
 const OVER_BUDGET_AVOID_RATIO = 1.25;
 
 function needsMore(
+  verdict: "INSUFFICIENT_EVIDENCE" | "NEEDS_CLARIFICATION",
   reason: string,
   uncertainties: string[],
   source: "llm" | "rules",
 ): Recommendation {
   return {
-    verdict: "NEEDS_MORE_INFO",
+    verdict,
     reason,
     tradeoffs: [],
     uncertainties,
@@ -42,6 +49,7 @@ export function deterministicVerdict(
 ): Recommendation {
   if (ranked.length === 0) {
     return needsMore(
+      "INSUFFICIENT_EVIDENCE",
       "No product listings were found across the searched sources, so there is nothing to recommend yet.",
       ["Try broader search terms, a corrected category, or more sources."],
       "rules",
@@ -69,6 +77,7 @@ export function deterministicVerdict(
 
   if (price == null) {
     return needsMore(
+      "INSUFFICIENT_EVIDENCE",
       `The closest match is "${top.product.title}" (${top.product.merchant}), but its price could not be verified, so a recommendation cannot be defended.`,
       [
         "Open the listing to confirm the current price, then re-run the search.",
@@ -80,6 +89,7 @@ export function deterministicVerdict(
 
   if (max != null && price > max) {
     return needsMore(
+      "NEEDS_CLARIFICATION",
       `The best match (${top.product.title} at ${formatInr(price)}) is ${formatInr(price - max)} over your ${formatInr(max)} budget. Confirm whether the budget is flexible or share more requirements.`,
       [],
       "rules",
@@ -111,6 +121,7 @@ export function validateLlmVerdict(
 
   if (input.productId != null && !target) {
     return needsMore(
+      "INSUFFICIENT_EVIDENCE",
       "The AI recommendation referenced an option outside the verified results, so it was discarded.",
       ["Re-run the search to get a fresh recommendation."],
       "rules",
@@ -139,6 +150,7 @@ export function validateLlmVerdict(
   if (input.verdict === "BUY") {
     if (!target) {
       return needsMore(
+        "INSUFFICIENT_EVIDENCE",
         "The AI recommendation did not name a verifiable option, so no recommendation can stand.",
         ["Re-run the search to get a fresh recommendation."],
         "rules",
@@ -146,6 +158,7 @@ export function validateLlmVerdict(
     }
     if (price == null) {
       return needsMore(
+        "INSUFFICIENT_EVIDENCE",
         `The AI suggested "${target.product.title}", but its price is unverified, so the recommendation cannot stand.`,
         ["Open the listing to confirm the current price, then re-run the search."],
         "rules",

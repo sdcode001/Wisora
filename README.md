@@ -6,23 +6,32 @@ shopping sources, compares real options, and gives a reasoned BUY / WAIT /
 AVOID recommendation with traceable links. It never invents products, prices,
 or reviews.
 
-Status: Phase 1 complete (discovery → comparison → decision slice).
+Status: Phase 2 Slice 1 complete — decision-correctness machinery
+(requirements → eligibility → evidence → weighted scoring → validated verdict)
+on top of the Phase 1 slice.
 
 ## How it works
 
 1. You describe a need by typing or voice input (Chrome/Edge), e.g. "Find a laptop under ₹90,000 for .NET development."
-2. Wisora extracts requirements (deterministic rules first, Muse assist for
-   ambiguous queries) and shows the detected category.
+2. Wisora extracts requirements — must-haves, nice-to-haves, and explicit
+   exclusions (deterministic rules first, Muse assist when available) — and
+   asks at most two clarification questions when something material is
+   ambiguous.
 3. You correct the category and toggle shopping sources if needed.
 4. One search fans out to the enabled sources through a domain-restricted
    search API; results are normalized, attributed, deduplicated, and enriched
    with prices, review ratings, and product photos seen on retailer pages.
-5. Deterministic scoring ranks the options; Muse explains the trade-offs and
-   proposes a verdict, which is then validated against hard rules (budget
-   vetoes, grounded product references, no forced verdicts).
+5. Options that violate the budget, a mandatory requirement, or an
+   exclusion are filtered out with stated reasons. Survivors are scored on
+   four weighted dimensions (price fit, relevance, evidence, preferences);
+   Muse proposes a verdict, which is then validated against hard rules
+   (budget vetoes, grounded product references, no invented prices, no
+   sale-prediction waits).
 6. Once the recommendation is ready, you get the top 5 picks as product
-   cards, side-by-side comparison (including review ratings), and a verdict
-   panel with reasons, trade-offs, uncertainties, and evidence links.
+   cards with score breakdowns and per-requirement checks, side-by-side
+   comparison (including review ratings), an excluded-options panel, an
+   evidence-confidence meter, and a verdict panel with reasons, trade-offs,
+   and uncertainties. Scoring weights are adjustable without re-searching.
 
 ## Stack
 
@@ -87,10 +96,14 @@ Tata CLiQ, Nykaa Fashion.
 ## API routes
 
 - `POST /api/intent` — `{ query }` → detected category, budget, search terms
+- `POST /api/requirements` — `{ query, intent?, answers? }` → requirement
+  set + clarification questions + suggested category
 - `POST /api/search` — `{ query, category?, disabled?, maxResults? }` →
   normalized products + per-source statuses + warnings
 - `POST /api/recommend` — full pipeline (or pass-through of `products` from
-  `/api/search` to avoid re-searching) → ranked products + validated verdict
+  `/api/search` to avoid re-searching; accepts `requirements`, `weights`,
+  `allowOverBudget`) → ranked products with score breakdowns and evidence,
+  excluded options, confidence assessment, and validated verdict
 
 ## Limitations (Phase 1)
 
@@ -109,16 +122,22 @@ Tata CLiQ, Nykaa Fashion.
   price evidence). The UI never shows fabricated reviews or ratings.
 - One search call covers all enabled domains; per-source failures are reported
   per search, not per site connection.
-- WAIT verdicts require a concrete stated reason; when evidence is thin the
-  app says NEEDS MORE INFO instead of guessing.
+- WAIT verdicts require a concrete evidence-based reason; sale and launch
+  predictions are vetoed. When evidence is thin the app abstains with
+  INSUFFICIENT_EVIDENCE; when every option violates the budget or a
+  mandatory requirement it asks with NEEDS_CLARIFICATION.
+- Structured specifications are not extracted yet: requirement matching
+  works on listing titles and page text (numeric minimums with unit
+  normalization, token coverage otherwise), graded met / not-met / unknown.
 - Out of scope for Phase 1: accounts, saved history, price alerts, financial
   planning, direct retailer integrations.
 
 ## Verification
 
 - `npm run typecheck`, `npm run lint`, `npm run build` — all green.
-- `npm test` — minimal suite: intent rules, dedup, scoring/verdict logic,
-  and the source-toggle regression.
+- `npm test` — focused suite: intent rules, dedup, scoring/verdict/policy
+  logic, requirements, eligibility, evidence quality, weights, route
+  contracts, and a 14-scenario deterministic eval dataset (`lib/eval/`).
 - Live-verified during development: key-authenticated `muse exec`
   (intent + verdict), Tavily search with domain restriction, Tavily extract
   shape, and route error paths (400/503 with honest messages).

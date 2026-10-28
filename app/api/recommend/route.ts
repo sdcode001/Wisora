@@ -1,20 +1,24 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { CategorySchema, enabledSourcesFor, SOURCES } from "../../../config/sources";
+import { filterEligible } from "../../../lib/eligibility/filter";
 import {
-  CategorySchema,
-  enabledSourcesFor,
-  SOURCES,
-} from "../../../config/sources";
+  assessConfidence,
+  buildProductEvidence,
+} from "../../../lib/evidence/quality";
 import { resolveIntent } from "../../../lib/intent/service";
 import { IntentSchema } from "../../../lib/intent/types";
 import { getReasonProvider } from "../../../lib/llm/provider";
 import { dedupeProducts } from "../../../lib/products/dedup";
 import { ProductSchema, type Product } from "../../../lib/products/schema";
-import { scoreProducts } from "../../../lib/recommend/score";
+import { extractRequirements } from "../../../lib/requirements/extract";
+import { RequirementSetSchema } from "../../../lib/requirements/types";
+import { describeRankingGap, scoreProducts } from "../../../lib/recommend/score";
+import { decideRecommendation } from "../../../lib/recommend/policy";
 import {
-  deterministicVerdict,
-  validateLlmVerdict,
-} from "../../../lib/recommend/verdict";
+  DEFAULT_WEIGHTS,
+  ScoreWeightsSchema,
+} from "../../../lib/recommend/weights";
 import {
   TavilySourceAdapter,
   type SourceStatus,
@@ -34,6 +38,9 @@ const BodySchema = z.object({
   disabled: z.record(z.string(), z.boolean()).optional(),
   maxResults: z.number().int().min(1).max(50).optional(),
   intent: IntentSchema.optional(),
+  requirements: RequirementSetSchema.optional(),
+  weights: z.unknown().optional(),
+  allowOverBudget: z.boolean().optional(),
   products: z.array(ProductSchema).optional(),
   statuses: z.array(StatusSchema).optional(),
   searchedAt: z.string().optional(),
@@ -49,6 +56,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
   const input = parsed.data;
+  const warnings: string[] = [];
 
   const resolved = input.intent
     ? { intent: input.intent, llmUsed: false, llmAvailable: true }
@@ -57,17 +65,27 @@ export async function POST(request: Request): Promise<NextResponse> {
   const category = input.category ?? intent.category;
   const categorySource = input.category ? "user" : "detected";
 
+  const requirements =
+    input.requirements ??
+    (await extractRequirements(intent.query, intent)).requirements;
+
+  const weightsParsed = ScoreWeightsSchema.safeParse(
+    input.weights ?? DEFAULT_WEIGHTS,
+  );
+  const weights = weightsParsed.success ? weightsParsed.data : DEFAULT_WEIGHTS;
+  if (!weightsParsed.success) {
+    warnings.push("Invalid scoring weights ignored; using defaults.");
+  }
+
   let products: Product[];
   let statuses: SourceStatus[];
   let searchedAt: string;
-  const warnings: string[] = [];
 
   if (input.products) {
     products = input.products;
     statuses = (input.statuses ?? []) as SourceStatus[];
     searchedAt = input.searchedAt ?? new Date().toISOString();
   } else {
-    // Client sends `disabled` flags; convert to enabled-overrides.
     const enabledOverrides = Object.fromEntries(
       Object.entries(input.disabled ?? {}).map(([id, isDisabled]) => [
         id,
@@ -104,15 +122,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       apiKey,
       filters: { budgetInr: intent.budgetInr, maxResults: input.maxResults },
     });
-    const deduped = dedupeProducts(outcome.results);
-    products = deduped.products;
+    products = outcome.results;
     statuses = outcome.statuses;
     searchedAt = new Date().toISOString();
-    if (deduped.removed > 0) {
-      warnings.push(
-        `${deduped.removed} duplicate listing${deduped.removed === 1 ? " was" : "s were"} merged.`,
-      );
-    }
     if (outcome.enrichmentNote) {
       warnings.push(outcome.enrichmentNote);
     }
@@ -131,16 +143,57 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
   }
 
-  const effectiveIntent = { ...intent, category };
-  const ranked = scoreProducts(products, effectiveIntent);
+  const deduped = dedupeProducts(products);
+  if (deduped.removed > 0) {
+    warnings.push(
+      `${deduped.removed} duplicate listing${deduped.removed === 1 ? " was" : "s were"} merged.`,
+    );
+  }
 
-  let recommendation = deterministicVerdict(ranked, effectiveIntent);
-  const reasonProvider = products.length > 0 ? getReasonProvider() : null;
+  const effectiveIntent = { ...intent, category };
+  const { eligible, excluded, checks } = filterEligible(
+    deduped.products,
+    requirements,
+    effectiveIntent,
+    { allowOverBudget: input.allowOverBudget },
+  );
+  if (excluded.length > 0) {
+    warnings.push(
+      `${excluded.length} option${excluded.length === 1 ? " was" : "s were"} excluded by requirements or budget.`,
+    );
+  }
+
+  const ranked = scoreProducts(eligible, effectiveIntent, requirements, weights);
+  const evidence = new Map(
+    ranked.map((entry) => [
+      entry.product.id,
+      buildProductEvidence(entry.product, deduped.conflicts),
+    ]),
+  );
+  const confidence = assessConfidence(
+    ranked.slice(0, 5).map((entry) => entry.product),
+    evidence,
+  );
+
+  let llmVerdict:
+    | {
+        verdict: "BUY" | "WAIT" | "AVOID";
+        productId?: string | null;
+        reason: string;
+        tradeoffs: string[];
+        uncertainties: string[];
+      }
+    | undefined;
+  const reasonProvider = eligible.length > 0 ? getReasonProvider() : null;
   if (reasonProvider) {
     try {
       const llm = await reasonProvider.explainVerdict({
         query: intent.query,
         budgetMax: intent.budgetInr?.max,
+        constraints: [
+          ...requirements.must.map((m) => `Must: ${m.label}`),
+          ...requirements.exclude.map((e) => `Exclude: ${e.label}`),
+        ],
         candidates: ranked.slice(0, 6).map((entry) => ({
           id: entry.product.id,
           title: entry.product.title,
@@ -157,31 +210,54 @@ export async function POST(request: Request): Promise<NextResponse> {
         })),
         topReasons: (ranked[0]?.score.reasons ?? []).map((r) => r.text),
       });
-      recommendation = validateLlmVerdict(
-        {
-          verdict: llm.verdict,
-          productId: llm.productId,
-          reason: llm.reason,
-          tradeoffs: llm.tradeoffs,
-          uncertainties: llm.uncertainties,
-        },
-        ranked,
-        effectiveIntent,
-      );
+      llmVerdict = {
+        verdict: llm.verdict,
+        productId: llm.productId,
+        reason: llm.reason,
+        tradeoffs: llm.tradeoffs,
+        uncertainties: llm.uncertainties,
+      };
     } catch {
-      recommendation = deterministicVerdict(ranked, effectiveIntent);
+      llmVerdict = undefined;
     }
   }
+
+  const recommendation = decideRecommendation({
+    ranked,
+    totalFound: deduped.products.length,
+    excluded,
+    intent: effectiveIntent,
+    confidence,
+    llmVerdict,
+  });
+
+  const runnerUpDiff =
+    ranked.length >= 2 && ranked[0] && ranked[1]
+      ? describeRankingGap(ranked[0], ranked[1])
+      : [];
 
   return NextResponse.json({
     intent: effectiveIntent,
     categorySource,
     llmUsed: resolved.llmUsed,
-    ranked,
+    requirements,
+    ranked: ranked.map((entry) => ({
+      ...entry,
+      analysis: {
+        checks: checks[entry.product.id] ?? [],
+        evidence: evidence.get(entry.product.id) ?? null,
+      },
+    })),
+    excluded,
+    excludedByBudget: excluded.filter((entry) =>
+      entry.reasons.some((reason) => reason.startsWith("Over budget")),
+    ).length,
     statuses,
     searchedAt,
     warnings,
     recommendation,
     reasoningUsed: recommendation.source,
+    confidence,
+    runnerUpDiff,
   });
 }
