@@ -149,12 +149,20 @@ const CUE_RANGE_RE =
 // "from 5000 to 10000"
 const FROM_RANGE_RE =
   /from\s*(?:₹|rs\.?|inr|rupees?)?\s*(?<min>[\d,]+(?:\.\d+)?)\s*(?<minUnit>lakhs?|lacs?|thousand|k|l|rupees?)?\s*(?:to|[-–])\s*(?:₹|rs\.?|inr|rupees?)?\s*(?<max>[\d,]+(?:\.\d+)?)\s*(?<maxUnit>lakhs?|lacs?|thousand|k|l|rupees?)?/i;
+// "for 5000 to 10000", "shoes for 50k-1L"
+const FOR_RANGE_RE =
+  /for\s*(?:₹|rs\.?|inr|rupees?)?\s*(?<min>[\d,]+(?:\.\d+)?)\s*(?<minUnit>lakhs?|lacs?|thousand|k|l|rupees?)?\s*(?:to|[-–])\s*(?:₹|rs\.?|inr|rupees?)?\s*(?<max>[\d,]+(?:\.\d+)?)\s*(?<maxUnit>lakhs?|lacs?|thousand|k|l|rupees?)?/i;
+// "5000 to 10000 price", "50k-1L range"
+const TRAILING_CUE_RANGE_RE =
+  /(?<min>[\d,]+(?:\.\d+)?)\s*(?<minUnit>lakhs?|lacs?|thousand|k|l|rupees?)?\s*(?:to|[-–])\s*(?:₹|rs\.?|inr|rupees?)?\s*(?<max>[\d,]+(?:\.\d+)?)\s*(?<maxUnit>lakhs?|lacs?|thousand|k|l|rupees?)?\s*(?:₹|rs\.?|inr|rupees?|prices?|range|budget)/i;
 
-const RANGE_PATTERNS = [
-  BETWEEN_RE,
-  CURRENCY_RANGE_RE,
-  CUE_RANGE_RE,
-  FROM_RANGE_RE,
+const RANGE_PATTERNS: Array<{ pattern: RegExp; needsMagnitude: boolean }> = [
+  { pattern: BETWEEN_RE, needsMagnitude: false },
+  { pattern: CURRENCY_RANGE_RE, needsMagnitude: false },
+  { pattern: CUE_RANGE_RE, needsMagnitude: false },
+  { pattern: FROM_RANGE_RE, needsMagnitude: false },
+  { pattern: FOR_RANGE_RE, needsMagnitude: true },
+  { pattern: TRAILING_CUE_RANGE_RE, needsMagnitude: true },
 ];
 const MONEY_RE =
   /(₹|rs\.?|inr|rupees?)?\s*([\d,]+(?:\.\d+)?)\s*(lakhs?|lacs?|thousand|k|l|rupees?)?\b/gi;
@@ -184,7 +192,7 @@ export function extractBudgetInr(text: string): {
   budget?: Budget;
   cleaned: string;
 } {
-  for (const pattern of RANGE_PATTERNS) {
+  for (const { pattern, needsMagnitude } of RANGE_PATTERNS) {
     const range = pattern.exec(text);
     const groups = range?.groups as
       | { min?: string; minUnit?: string; max?: string; maxUnit?: string }
@@ -202,6 +210,17 @@ export function extractBudgetInr(text: string): {
     ) {
       continue;
     }
+    if (needsMagnitude) {
+      // Bare "for 5 to 6 hours" or "16 to 17 price comparison" reads are
+      // not prices; require explicit currency/units or plausible magnitude.
+      const explicit =
+        /₹|rs\.?|inr|rupees?/i.test(range[0]) ||
+        groups.minUnit != null ||
+        groups.maxUnit != null;
+      if (!explicit && Math.max(rawMin, rawMax) < 100) {
+        continue;
+      }
+    }
     // "5 to 10 lakhs" reads the bare side in the same unit; large bare
     // numbers ("5000 to 2 lakh") are left as rupees.
     const minUnit =
@@ -212,7 +231,7 @@ export function extractBudgetInr(text: string): {
     const b = convertInr(rawMax, maxUnit);
     return {
       budget: { min: Math.min(a, b), max: Math.max(a, b) },
-      cleaned: collapseSpaces(text.replace(range[0], " ")),
+      cleaned: stripLeftoverCues(text.replace(range[0], " ")),
     };
   }
 
@@ -251,14 +270,7 @@ export function extractBudgetInr(text: string): {
   for (const [start, end] of spans.sort((a, b) => b[0] - a[0])) {
     cleaned = `${cleaned.slice(0, start)} ${cleaned.slice(end)}`;
   }
-  cleaned = collapseSpaces(
-    cleaned
-      .replace(
-        /\b(under|below|above|over|around|about|budget|within|up to|less than|more than|at most|at least|till|til|until|between|range|starting|maximum|minimum)\b\s*(?=\s|$|[,.])/gi,
-        " ",
-      )
-      .replace(/\b(max|min)\b\s*(?=$|[,.])/gi, " "),
-  );
+  cleaned = stripLeftoverCues(cleaned);
   const budget: Budget | undefined =
     min === undefined && max === undefined ? undefined : { min, max };
   if (budget?.min !== undefined && budget.max !== undefined && budget.min > budget.max) {
@@ -269,6 +281,17 @@ export function extractBudgetInr(text: string): {
 
 function collapseSpaces(s: string): string {
   return s.replace(/\s+/g, " ").trim();
+}
+
+function stripLeftoverCues(s: string): string {
+  return collapseSpaces(
+    s
+      .replace(
+        /\b(under|below|above|over|around|about|budget|within|up to|less than|more than|at most|at least|till|til|until|between|range|starting|maximum|minimum|prices?)\b\s*(?=\s|$|[,.])/gi,
+        " ",
+      )
+      .replace(/\b(max|min)\b\s*(?=$|[,.])/gi, " "),
+  );
 }
 
 function polish(s: string): string {

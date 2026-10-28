@@ -7,6 +7,8 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { SOURCES, type Category } from "../config/sources";
 import type { Intent } from "../lib/intent/types";
 import { normalizeWeights } from "../lib/recommend/weights";
@@ -41,6 +43,13 @@ interface IntentResponse {
   intent: Intent;
   llmUsed: boolean;
   llmAvailable: boolean;
+}
+
+interface AuthUser {
+  sub: string;
+  name: string | null;
+  email: string | null;
+  picture: string | null;
 }
 
 interface Product {
@@ -129,6 +138,52 @@ interface RequirementsResponse {
   requirements: RequirementSetData;
   questions: ClarificationQuestion[];
   suggestedCategory: string | null;
+}
+
+interface ReviewInsightData {
+  theme: string;
+  category: string;
+  sentiment: "positive" | "negative" | "mixed";
+  sources: string[];
+  distinctSources: number;
+  excerpt?: string;
+  quality: string;
+  limitations: string[];
+}
+
+interface ReviewRecordData {
+  id: string;
+  url: string;
+  sourceName: string;
+  sourceType: string;
+  title: string;
+  contentSource: string;
+  retrievedAt: string;
+  relevance: string;
+  duplicateOf?: string;
+}
+
+interface ReviewReportData {
+  productId: string;
+  records: ReviewRecordData[];
+  insights: ReviewInsightData[];
+  contradictions: Array<{
+    topic: string;
+    positiveSources: string[];
+    negativeSources: string[];
+    note: string;
+  }>;
+  quality: { level: string; distinctSources: number; exactMatches: number };
+  adjustment: { delta: number; reasons: string[]; unknownDimension: boolean };
+  adjustedTotal: number | null;
+  limitations: string[];
+}
+
+interface ReviewsResponse {
+  reports: ReviewReportData[];
+  rankImpact: string[];
+  wouldChangeTopPick: boolean;
+  warnings: string[];
 }
 
 interface ExcludedItem {
@@ -265,6 +320,56 @@ function scrollToElement(element: HTMLElement | null): void {
   });
 }
 
+const WORKFLOW_STORAGE_KEY = "wisora:workflow:v1";
+
+interface PersistedWorkflow {
+  version: 1;
+  query: string;
+  result: IntentResponse | null;
+  override: Category | null;
+  disabled: Record<string, boolean>;
+  reqs: RequirementsResponse | null;
+  answers: Record<string, string>;
+  weights: typeof DEFAULT_WEIGHT_STATE;
+  allowOverBudget: boolean;
+  search: SearchData | null;
+  verdict: VerdictData | null;
+  reviews: ReviewsResponse | null;
+  compareIds: string[];
+  showCompare: boolean;
+  error: string | null;
+  searchError: string | null;
+  verdictError: string | null;
+  reqsError: string | null;
+}
+
+function loadPersistedWorkflow(): PersistedWorkflow | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(WORKFLOW_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<PersistedWorkflow>;
+    if (parsed?.version !== 1) {
+      return null;
+    }
+    return parsed as PersistedWorkflow;
+  } catch {
+    return null;
+  }
+}
+
+function savePersistedWorkflow(state: PersistedWorkflow): void {
+  try {
+    window.localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage full or unavailable — the app works without persistence.
+  }
+}
+
 function Stars({ value }: { value: number }) {
   const pct = Math.max(0, Math.min(100, (value / 5) * 100));
   return (
@@ -384,9 +489,17 @@ export default function Home() {
   const [reqsLoading, setReqsLoading] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [answering, setAnswering] = useState(false);
+  const [reqsError, setReqsError] = useState<string | null>(null);
   const [weights, setWeights] = useState({ ...DEFAULT_WEIGHT_STATE });
   const [allowOverBudget, setAllowOverBudget] = useState(false);
   const [recalcLoading, setRecalcLoading] = useState(false);
+  const [reviews, setReviews] = useState<ReviewsResponse | null>(null);
+  const [reviewsLoading, setReviewsLoading] = useState(false);
+  const [reviewsError, setReviewsError] = useState<string | null>(null);
+  const [restored, setRestored] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const router = useRouter();
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [showCompare, setShowCompare] = useState(false);
   const [listening, setListening] = useState(false);
@@ -411,6 +524,36 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch("/api/auth/me");
+        if (cancelled) {
+          return;
+        }
+        if (response.ok) {
+          const data = (await response.json()) as { user: AuthUser | null };
+          if (data.user) {
+            setUser(data.user);
+            setAuthChecked(true);
+          } else {
+            router.replace("/login");
+          }
+        } else {
+          router.replace("/login");
+        }
+      } catch {
+        if (!cancelled) {
+          router.replace("/login");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  useEffect(() => {
     if (result) {
       scrollToElement(intentRef.current);
     }
@@ -428,6 +571,82 @@ export default function Home() {
     }
   }, [verdict]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- client-only restore
+     from localStorage must run in an effect; reading it during render
+     would mismatch the server HTML on hydration. */
+  useEffect(() => {
+    const saved = loadPersistedWorkflow();
+    if (saved) {
+      setQuery(saved.query ?? "");
+      setResult(saved.result);
+      setOverride(saved.override);
+      setDisabled(saved.disabled ?? {});
+      setReqs(saved.reqs);
+      setAnswers(saved.answers ?? {});
+      setReqsError(saved.reqsError);
+      if (saved.weights) {
+        setWeights(saved.weights);
+      }
+      setAllowOverBudget(saved.allowOverBudget ?? false);
+      setSearch(saved.search);
+      setVerdict(saved.verdict);
+      setReviews(saved.reviews);
+      setCompareIds(saved.compareIds ?? []);
+      setShowCompare(saved.showCompare ?? false);
+      setError(saved.error);
+      setSearchError(saved.searchError);
+      setVerdictError(saved.verdictError);
+      setStage(saved.verdict ? "done" : "idle");
+    }
+    setRestored(true);
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  useEffect(() => {
+    if (!restored) {
+      return;
+    }
+    savePersistedWorkflow({
+      version: 1,
+      query,
+      result,
+      override,
+      disabled,
+      reqs,
+      answers,
+      weights,
+      allowOverBudget,
+      search,
+      verdict,
+      reviews,
+      compareIds,
+      showCompare,
+      error,
+      searchError,
+      verdictError,
+      reqsError,
+    });
+  }, [
+    restored,
+    query,
+    result,
+    override,
+    disabled,
+    reqs,
+    answers,
+    weights,
+    allowOverBudget,
+    search,
+    verdict,
+    reviews,
+    compareIds,
+    showCompare,
+    error,
+    searchError,
+    verdictError,
+    reqsError,
+  ]);
+
   const effectiveCategory: Category | null =
     override ?? result?.intent.category ?? null;
 
@@ -440,6 +659,9 @@ export default function Home() {
   );
 
   const enabledCount = visibleSources.filter((s) => !disabled[s.id]).length;
+
+  const requirementsComplete =
+    reqs != null && !reqsLoading && reqs.questions.length === 0;
 
   const cards: Array<{
     product: Product;
@@ -477,6 +699,8 @@ export default function Home() {
     setVerdict(null);
     setSearchError(null);
     setVerdictError(null);
+    setReviews(null);
+    setReviewsError(null);
     setCompareIds([]);
     setShowCompare(false);
     setStage("idle");
@@ -491,8 +715,11 @@ export default function Home() {
     setOverride(null);
     setReqs(null);
     setAnswers({});
+    setReqsError(null);
     setWeights({ ...DEFAULT_WEIGHT_STATE });
     setAllowOverBudget(false);
+    setReviews(null);
+    setReviewsError(null);
     clearDownstream();
     try {
       const response = await fetch("/api/intent", {
@@ -505,26 +732,7 @@ export default function Home() {
       }
       const data = (await response.json()) as IntentResponse;
       setResult(data);
-      setReqsLoading(true);
-      try {
-        const reqResponse = await fetch("/api/requirements", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: data.intent.query,
-            intent: data.intent,
-          }),
-        });
-        if (reqResponse.ok) {
-          const reqData =
-            (await reqResponse.json()) as RequirementsResponse;
-          setReqs(reqData);
-        }
-      } catch {
-        // Search still works without extracted requirements.
-      } finally {
-        setReqsLoading(false);
-      }
+      await loadRequirements(data.intent);
     } catch {
       setError("Could not analyze that request. Please try again.");
     } finally {
@@ -594,6 +802,34 @@ export default function Home() {
     setError(null);
     setListening(true);
     recognition.start();
+  }
+
+  async function loadRequirements(intent: Intent): Promise<void> {
+    setReqsLoading(true);
+    setReqsError(null);
+    try {
+      const reqResponse = await fetch("/api/requirements", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: intent.query, intent }),
+      });
+      if (!reqResponse.ok) {
+        throw new Error(`requirements failed (${reqResponse.status})`);
+      }
+      const reqData = (await reqResponse.json()) as RequirementsResponse;
+      setReqs(reqData);
+    } catch {
+      setReqsError("Could not understand requirements. Please retry.");
+    } finally {
+      setReqsLoading(false);
+    }
+  }
+
+  async function retryRequirements(): Promise<void> {
+    if (!result || reqsLoading) {
+      return;
+    }
+    await loadRequirements(result.intent);
   }
 
   async function submitAnswers(): Promise<void> {
@@ -669,6 +905,8 @@ export default function Home() {
         throw new Error(data.error ?? `recalculation failed (${response.status})`);
       }
       setVerdict(data);
+      setReviews(null);
+      setReviewsError(null);
       setCompareIds([]);
       setShowCompare(false);
     } catch (e) {
@@ -680,8 +918,71 @@ export default function Home() {
     }
   }
 
+  async function signOut(): Promise<void> {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // Cookie may already be gone; still redirect to login.
+    }
+    setUser(null);
+    router.push("/login");
+  }
+
+  async function fetchReviews(): Promise<void> {
+    if (!verdict || !effectiveCategory || reviewsLoading) {
+      return;
+    }
+    const targets = verdict.ranked.slice(0, 3);
+    if (targets.length === 0) {
+      return;
+    }
+    setReviewsLoading(true);
+    setReviewsError(null);
+    try {
+      const response = await fetch("/api/reviews", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          products: targets.map((t) => ({
+            id: t.product.id,
+            title: t.product.title,
+          })),
+          category: effectiveCategory,
+          requirements: verdict.requirements,
+          rankedTotals: verdict.ranked.map((t) => ({
+            id: t.product.id,
+            total: t.score.total,
+          })),
+        }),
+      });
+      const data = (await response.json()) as ReviewsResponse & {
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(
+          data.error ?? `review insights failed (${response.status})`,
+        );
+      }
+      setReviews(data);
+    } catch (e) {
+      setReviewsError(
+        e instanceof Error
+          ? e.message
+          : "Could not gather review insights. Please try again.",
+      );
+    } finally {
+      setReviewsLoading(false);
+    }
+  }
+
   async function runSearch(): Promise<void> {
-    if (!result || !effectiveCategory || stage === "searching" || stage === "recommending") {
+    if (
+      !result ||
+      !effectiveCategory ||
+      !requirementsComplete ||
+      stage === "searching" ||
+      stage === "recommending"
+    ) {
       return;
     }
     let phase: "search" | "recommend" = "search";
@@ -811,6 +1112,20 @@ export default function Home() {
       ? cards.find((c) => c.product.id === verdict.recommendation.productId)?.product ?? null
       : null;
 
+  if (!authChecked) {
+    return (
+      <main className="relative mx-auto flex min-h-screen max-w-3xl flex-col items-center justify-center px-4 text-stone-500">
+        <p className="flex items-center gap-2 text-sm">
+          <span
+            aria-hidden="true"
+            className="h-4 w-4 rounded-full border-2 border-stone-500/30 border-t-stone-200 motion-safe:animate-spin"
+          />
+          Checking sign-in…
+        </p>
+      </main>
+    );
+  }
+
   return (
     <main className="relative mx-auto min-h-screen max-w-3xl px-4 py-10 text-stone-200 sm:px-6">
       <div
@@ -821,6 +1136,50 @@ export default function Home() {
         <p className="text-sm font-semibold tracking-[0.2em] text-teal-300 uppercase">
           Wisora
         </p>
+          {authChecked &&
+            (user ? (
+              <div className="fixed top-3 right-3 z-30 flex items-center gap-1.5 rounded-full border border-white/15 bg-stone-950/70 py-1 pr-1.5 pl-1 shadow-lg backdrop-blur-xl sm:top-4 sm:right-4">
+                <div className="relative flex h-7 w-7 items-center justify-center overflow-hidden rounded-full border border-white/15 bg-white/10 text-xs font-semibold text-teal-200">
+                  {(user.name ?? user.email ?? "?").charAt(0).toUpperCase()}
+                  {user.picture && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={user.picture}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      onError={(event) => {
+                        event.currentTarget.style.display = "none";
+                      }}
+                      className="absolute inset-0 h-full w-full object-cover"
+                    />
+                  )}
+                </div>
+                <div className="hidden text-right sm:block">
+                  <p className="max-w-[9rem] truncate text-xs font-medium text-stone-200">
+                    {user.name ?? user.email ?? "Signed in"}
+                  </p>
+                  {user.email && user.name && (
+                    <p className="max-w-[9rem] truncate text-[11px] leading-tight text-stone-500">
+                      {user.email}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  className="rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[11px] font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <Link
+                href="/login"
+                className="fixed top-3 right-3 z-30 rounded-lg border border-white/15 bg-stone-950/70 px-4 py-2 text-sm font-semibold text-stone-200 shadow-lg backdrop-blur-xl transition hover:border-teal-300/50 hover:text-teal-200 sm:top-4 sm:right-4"
+              >
+                Sign in
+              </Link>
+            ))}
         <h1 className="mt-3 font-serif text-4xl leading-tight text-stone-50 sm:text-5xl">
           Buy smarter, with evidence.
         </h1>
@@ -958,7 +1317,7 @@ export default function Home() {
                   </span>{" "}
                   <span className="text-xs text-stone-500">
                     ({result.intent.categoryConfidence} confidence
-                    {result.llmUsed ? ", refined with Muse" : ", rule-based"})
+                    {result.llmUsed ? ", interpreted with Muse" : ", rule-based"})
                   </span>
                 </dd>
               </div>
@@ -1050,6 +1409,19 @@ export default function Home() {
                 <p className="text-sm text-stone-500">
                   Understanding requirements…
                 </p>
+              )}
+              {reqsError && !reqs && (
+                <div className="mt-2 flex flex-wrap items-center gap-3 rounded-xl border border-amber-300/25 bg-amber-400/5 p-3">
+                  <p className="text-sm text-amber-200">{reqsError}</p>
+                  <button
+                    type="button"
+                    onClick={() => void retryRequirements()}
+                    disabled={reqsLoading}
+                    className="rounded-lg bg-white px-4 py-1.5 text-sm font-semibold text-stone-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Retry
+                  </button>
+                </div>
               )}
               {reqs &&
                 (reqs.requirements.useContext != null ||
@@ -1169,7 +1541,8 @@ export default function Home() {
                 disabled={
                   stage === "searching" ||
                   stage === "recommending" ||
-                  enabledCount === 0
+                  enabledCount === 0 ||
+                  !requirementsComplete
                 }
                 className="rounded-lg bg-white px-5 py-2.5 text-sm font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -1188,6 +1561,15 @@ export default function Home() {
               {enabledCount === 0 && (
                 <p className="mt-2 text-xs text-stone-500">
                   Enable at least one source to search.
+                </p>
+              )}
+              {!requirementsComplete && enabledCount > 0 && (
+                <p className="mt-2 text-xs text-stone-500">
+                  {reqsLoading || answering
+                    ? "Understanding requirements…"
+                    : reqs == null
+                      ? "Waiting for requirement understanding…"
+                      : "Answer the quick questions above to enable search."}
                 </p>
               )}
 
@@ -1456,6 +1838,55 @@ export default function Home() {
               </div>
             </details>
 
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void fetchReviews()}
+                disabled={reviewsLoading || cards.length === 0}
+                className="rounded-lg border border-white/15 bg-white/5 px-4 py-2 text-sm font-semibold text-stone-200 backdrop-blur transition hover:border-teal-300/50 hover:text-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {reviewsLoading ? (
+                  <span className="flex items-center gap-2">
+                    <span
+                      aria-hidden="true"
+                      className="h-4 w-4 rounded-full border-2 border-stone-200/30 border-t-stone-200 motion-safe:animate-spin"
+                    />
+                    Gathering review insights…
+                  </span>
+                ) : reviews ? (
+                  "Refresh review insights"
+                ) : (
+                  "Get review insights"
+                )}
+              </button>
+              <span className="text-xs text-stone-500">
+                Top {Math.min(3, cards.length)} picks · separate search over
+                review sources
+              </span>
+            </div>
+            {reviewsError && (
+              <p className="mt-2 rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-200 backdrop-blur">
+                {reviewsError}
+              </p>
+            )}
+            {reviews?.warnings.map((warning) => (
+              <p key={warning} className="mt-1 text-xs text-amber-200/80">
+                {warning}
+              </p>
+            ))}
+            {reviews && reviews.rankImpact.length > 0 && (
+              <div className="mt-2 rounded-xl border border-violet-300/25 bg-violet-400/5 p-3">
+                <p className="text-sm font-semibold text-violet-200">
+                  Review evidence would reorder the ranking
+                </p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-stone-400">
+                  {reviews.rankImpact.map((note) => (
+                    <li key={note}>{note}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {compareIds.length > 0 && (
               <div className="glass sticky bottom-4 z-10 mt-4 flex flex-wrap items-center gap-3 rounded-2xl px-4 py-2.5">
                 <p className="text-sm text-stone-300">
@@ -1571,6 +2002,26 @@ export default function Home() {
                     </tr>
                     <tr>
                       <th className="p-3 text-left font-medium text-stone-300" scope="row">
+                        Review signal
+                      </th>
+                      {compareItems.map(({ product }) => {
+                        const itemReport =
+                          reviews?.reports.find(
+                            (r) => r.productId === product.id,
+                          ) ?? null;
+                        return (
+                          <td key={product.id} className="p-3 text-stone-400">
+                            {!itemReport
+                              ? "—"
+                              : itemReport.adjustment.unknownDimension
+                                ? "Unknown"
+                                : `${itemReport.adjustment.delta > 0 ? "+" : ""}${itemReport.adjustment.delta} · ${itemReport.quality.distinctSources} sources`}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr>
+                      <th className="p-3 text-left font-medium text-stone-300" scope="row">
                         Listing
                       </th>
                       {compareItems.map(({ product }) => (
@@ -1621,6 +2072,8 @@ export default function Home() {
                   const checked = compareIds.includes(p.id);
                   const compareDisabled =
                     !checked && compareIds.length >= MAX_COMPARE;
+                  const report =
+                    reviews?.reports.find((r) => r.productId === p.id) ?? null;
                   return (
                     <li
                       key={p.id}
@@ -1722,6 +2175,134 @@ export default function Home() {
                           Listing data may be stale — verify on the
                           retailer&apos;s page.
                         </p>
+                      )}
+                      {report && (
+                        <div className="mt-2 rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                          <p className="text-xs font-semibold text-stone-200">
+                            Review insights{" "}
+                            <span className="font-normal text-stone-500">
+                              · {report.quality.distinctSources} distinct
+                              source
+                              {report.quality.distinctSources === 1 ? "" : "s"}{" "}
+                              · evidence {report.quality.level}
+                              {report.adjustedTotal != null && score
+                                ? ` · score ${score.total} → ${report.adjustedTotal}`
+                                : ""}
+                            </span>
+                          </p>
+                          {report.insights.length === 0 ? (
+                            <p className="mt-1 text-xs text-stone-500">
+                              No recurring themes confirmed.
+                            </p>
+                          ) : (
+                            <>
+                              {report.insights.filter(
+                                (i) => i.sentiment === "positive",
+                              ).length > 0 && (
+                                <ul className="mt-1.5 space-y-1 text-xs">
+                                  {report.insights
+                                    .filter((i) => i.sentiment === "positive")
+                                    .map((i) => (
+                                      <li
+                                        key={`${i.theme}-positive`}
+                                        className="text-teal-300"
+                                      >
+                                        + {i.theme}{" "}
+                                        <span className="text-stone-500">
+                                          ({i.distinctSources} sources ·{" "}
+                                          {i.quality})
+                                        </span>
+                                      </li>
+                                    ))}
+                                </ul>
+                              )}
+                              {report.insights.filter(
+                                (i) => i.sentiment === "negative",
+                              ).length > 0 && (
+                                <ul className="mt-1.5 space-y-1 text-xs">
+                                  {report.insights
+                                    .filter((i) => i.sentiment === "negative")
+                                    .map((i) => (
+                                      <li
+                                        key={`${i.theme}-negative`}
+                                        className="text-rose-300"
+                                      >
+                                        – {i.theme}{" "}
+                                        <span className="text-stone-500">
+                                          ({i.distinctSources} sources ·{" "}
+                                          {i.quality})
+                                        </span>
+                                      </li>
+                                    ))}
+                                </ul>
+                              )}
+                            </>
+                          )}
+                          {report.contradictions.map((c) => (
+                            <p
+                              key={c.topic}
+                              className="mt-1.5 text-xs text-amber-200/80"
+                            >
+                              ⚠ {c.note}
+                            </p>
+                          ))}
+                          {report.adjustment.unknownDimension ? (
+                            <p className="mt-1 text-xs text-stone-500">
+                              Review signal: unknown — not enough corroborated
+                              evidence to adjust the score.
+                            </p>
+                          ) : (
+                            report.adjustment.delta !== 0 && (
+                              <p className="mt-1 text-xs text-stone-400">
+                                Score impact{" "}
+                                {report.adjustment.delta > 0 ? "+" : ""}
+                                {report.adjustment.delta}:{" "}
+                                {report.adjustment.reasons[0]}
+                              </p>
+                            )
+                          )}
+                          {report.limitations.slice(0, 2).map((limitation) => (
+                            <p
+                              key={limitation}
+                              className="mt-1 text-xs text-stone-500"
+                            >
+                              {limitation}
+                            </p>
+                          ))}
+                          {report.records.filter(
+                            (r) =>
+                              !r.duplicateOf && r.relevance !== "irrelevant",
+                          ).length > 0 && (
+                            <ul className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                              {report.records
+                                .filter(
+                                  (r) =>
+                                    !r.duplicateOf &&
+                                    r.relevance !== "irrelevant",
+                                )
+                                .slice(0, 4)
+                                .map((r) => (
+                                  <li key={r.id}>
+                                    <a
+                                      href={r.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-sky-300 hover:underline"
+                                    >
+                                      {r.sourceName} · {r.relevance} ·{" "}
+                                      {new Date(
+                                        r.retrievedAt,
+                                      ).toLocaleDateString("en-IN")}
+                                    </a>
+                                  </li>
+                                ))}
+                            </ul>
+                          )}
+                          <p className="mt-1.5 text-[11px] text-stone-600">
+                            AI-grouped observations from linked sources — not
+                            verified specifications.
+                          </p>
+                        </div>
                       )}
                       {(pros.length > 0 || cons.length > 0) && (
                         <ul className="mt-2 space-y-1 text-sm">

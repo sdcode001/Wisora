@@ -6,7 +6,6 @@ coverage/
 .agents/
 .git/
 .env
-.env*.local
 *.log
 *.tsbuildinfo
 .DS_Store

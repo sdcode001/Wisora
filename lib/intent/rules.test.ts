@@ -72,3 +72,37 @@ test("flexible budget phrasings", () => {
   });
   expect(analyzeIntent("laptop 50000 rupees").budgetInr).toEqual({ max: 50000 });
 });
+
+test("for-ranges and trailing price cues", () => {
+  const nike = analyzeIntent(
+    "suggest me a nike running shoe for 5000 to 10000 price in black color",
+  );
+  expect(nike.category).toBe("footwear");
+  expect(nike.budgetInr).toEqual({ min: 5000, max: 10000 });
+  expect(nike.searchTerms).toBe(
+    "suggest me a nike running shoe in black color",
+  );
+
+  expect(analyzeIntent("shoes for 5000 to 10000").budgetInr).toEqual({
+    min: 5000,
+    max: 10000,
+  });
+  expect(analyzeIntent("laptop 50k to 1L range").budgetInr).toEqual({
+    min: 50000,
+    max: 100000,
+  });
+  expect(analyzeIntent("phone 20000-30000 budget").budgetInr).toEqual({
+    min: 20000,
+    max: 30000,
+  });
+});
+
+test("tiny bare ranges are not prices", () => {
+  expect(
+    analyzeIntent("laptop with battery for 5 to 6 hours").budgetInr,
+  ).toBeUndefined();
+  expect(
+    analyzeIntent("iphone 16 to 17 price comparison").budgetInr,
+  ).toBeUndefined();
+  expect(analyzeIntent("top 5 to 10 running shoes").budgetInr).toBeUndefined();
+});

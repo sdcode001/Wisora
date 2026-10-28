@@ -6,18 +6,22 @@ shopping sources, compares real options, and gives a reasoned BUY / WAIT /
 AVOID recommendation with traceable links. It never invents products, prices,
 or reviews.
 
-Status: Phase 2 Slice 1 complete — decision-correctness machinery
-(requirements → eligibility → evidence → weighted scoring → validated verdict)
-on top of the Phase 1 slice.
+Status: Phase 3 complete — review intelligence and trust layer on top of
+the Phase 2 decision engine: on-demand review retrieval, validated theme
+extraction, evidence-quality grading, and bounded score adjustments.
 
 ## How it works
 
 1. You describe a need by typing or voice input (Chrome/Edge), e.g. "Find a laptop under ₹90,000 for .NET development."
-2. Wisora extracts requirements — must-haves, nice-to-haves, and explicit
-   exclusions (deterministic rules first, Muse assist when available) — and
+2. Muse interprets the request (category, budget range, search terms) with
+   validated, schema-checked output; deterministic rules fill any gaps and
+   take over fully when no API key is configured. Wisora then extracts
+   requirements — must-haves, nice-to-haves, and explicit exclusions — and
    asks at most two clarification questions when something material is
    ambiguous.
-3. You correct the category and toggle shopping sources if needed.
+3. You answer any clarification questions, then correct the category and
+   toggle shopping sources if needed. Product search stays disabled until
+   requirement understanding is complete.
 4. One search fans out to the enabled sources through a domain-restricted
    search API; results are normalized, attributed, deduplicated, and enriched
    with prices, review ratings, and product photos seen on retailer pages.
@@ -32,6 +36,11 @@ on top of the Phase 1 slice.
    comparison (including review ratings), an excluded-options panel, an
    evidence-confidence meter, and a verdict panel with reasons, trade-offs,
    and uncertainties. Scoring weights are adjustable without re-searching.
+7. Optionally, "Get review insights" searches configured review sources for
+   the top 3 picks, extracts recurring strengths and concerns with cited
+   sources, grades evidence quality, and shows bounded score adjustments
+   (+5/−8 max) with rank-impact notes. Single-source findings stay
+   preliminary; contradictions add uncertainty instead of points.
 
 ## Stack
 
@@ -51,9 +60,17 @@ Requires Node 22+ and npm, plus the `muse` CLI on your `PATH`
 ```sh
 npm install
 cp .env.example .env
-# fill in META_API_KEY and TAVILY_API_KEY in .env (never commit it)
+# fill in META_API_KEY, TAVILY_API_KEY, GOOGLE_OAUTH_CLIENT_ID, and
+# SESSION_SECRET in .env (never commit it)
 npm run dev
 ```
+
+For Google sign-in, create an OAuth client ID of type "Web application" in
+[Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+and register `http://localhost:3000` as an authorized JavaScript origin
+(add your production origin when deploying). No client secret is needed:
+the login page uses Google Identity Services, and the server verifies the
+signed ID token directly with Google's published keys.
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
@@ -74,6 +91,8 @@ If `npm` fails with EPERM on `~/.npm`, fix ownership once:
 |---|---|---|
 | `META_API_KEY` | yes (for AI reasoning) | Muse Meta API key, piped to `muse exec` via stdin |
 | `TAVILY_API_KEY` | yes (for live search) | Tavily key for domain-restricted search + extract |
+| `GOOGLE_OAUTH_CLIENT_ID` | yes (for sign-in) | Google OAuth web client ID; public, also served to the login page |
+| `SESSION_SECRET` | yes (for sign-in) | Random secret for signing session cookies (server-side only) |
 | `WISORA_MUSE_MODEL` | no | Model id (default `muse-spark-1.3`) |
 | `WISORA_MUSE_EFFORT_CLASSIFY` | no | Effort for intent extraction (default `low`) |
 | `WISORA_MUSE_EFFORT_REASON` | no | Effort for verdict rationale (default `medium`) |
@@ -104,6 +123,9 @@ Tata CLiQ, Nykaa Fashion.
   `/api/search` to avoid re-searching; accepts `requirements`, `weights`,
   `allowOverBudget`) → ranked products with score breakdowns and evidence,
   excluded options, confidence assessment, and validated verdict
+- `POST /api/reviews` — `{ products (1–3), category?, requirements?,
+  rankedTotals? }` → per-product review records, validated insights,
+  contradictions, evidence quality, and bounded score adjustments
 
 ## Limitations (Phase 1)
 
@@ -129,6 +151,13 @@ Tata CLiQ, Nykaa Fashion.
 - Structured specifications are not extracted yet: requirement matching
   works on listing titles and page text (numeric minimums with unit
   normalization, token coverage otherwise), graded met / not-met / unknown.
+- Review intelligence works from search excerpts and extractable pages, not
+  complete review corpora: shopping-site review walls are often unreachable,
+  so coverage is partial by design. Identity matching is heuristic (model
+  codes parsed from titles), fashion items rarely match exactly, and the
+  system never reports review counts, percentages, or defect rates — only
+  distinct corroborating sources. The official verdict is never silently
+  changed by review evidence; rank impact is reported, not applied.
 - Out of scope for Phase 1: accounts, saved history, price alerts, financial
   planning, direct retailer integrations.
 
@@ -136,8 +165,9 @@ Tata CLiQ, Nykaa Fashion.
 
 - `npm run typecheck`, `npm run lint`, `npm run build` — all green.
 - `npm test` — focused suite: intent rules, dedup, scoring/verdict/policy
-  logic, requirements, eligibility, evidence quality, weights, route
-  contracts, and a 14-scenario deterministic eval dataset (`lib/eval/`).
+  logic, requirements, eligibility, evidence quality, weights, review
+  identity/retrieval/themes/quality/adjustment, route contracts, and a
+  14-scenario deterministic eval dataset (`lib/eval/`).
 - Live-verified during development: key-authenticated `muse exec`
   (intent + verdict), Tavily search with domain restriction, Tavily extract
   shape, and route error paths (400/503 with honest messages).
