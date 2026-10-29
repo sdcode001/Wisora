@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -71,6 +72,7 @@ interface Product {
 interface ScoreReason {
   text: string;
   sentiment: "pro" | "con" | "info";
+  source?: "query" | "profile";
 }
 
 interface RequirementCheck {
@@ -229,6 +231,81 @@ interface VerdictData {
   requirements: RequirementSetData;
   confidence: { score: number; level: string; gaps: string[] };
   runnerUpDiff: string[];
+  intent?: Intent;
+  personalization?: PersonalizationData;
+}
+
+interface PersonalizationData {
+  enabled: boolean;
+  reason?: "signed-out" | "opted-out" | "no-profile" | "unreadable";
+  applied: string[];
+  skipped: string[];
+  budgetSource: "query" | "profile" | "none";
+  weightsSource: "request" | "profile" | "default";
+}
+
+type Provenance = "explicit" | "confirmed" | "inferred";
+
+interface StoredSection<T> {
+  value: T;
+  updatedAt: string;
+  provenance: Provenance;
+}
+
+interface GeneralValue {
+  currency: string;
+  locale: string;
+  categories: Category[];
+  preferredBrands: string[];
+  avoidedBrands: string[];
+  preferredMerchants: string[];
+  decisionPriority?: string;
+}
+
+interface CategoryValue {
+  category: Category;
+  budgetInr?: { min?: number; max?: number };
+  useCase?: string;
+  performanceLevel?: string;
+  minRamGb?: number;
+  minStorageGb?: number;
+  batteryPriority?: number;
+  portability?: string;
+  warrantyPriority?: number;
+  sizes?: string[];
+  styles?: string[];
+  materials?: string[];
+  concerns?: string[];
+  notes?: string;
+}
+
+interface ProfileData {
+  version: 1;
+  userSub: string;
+  general: StoredSection<GeneralValue>;
+  categories: Partial<Record<Category, StoredSection<CategoryValue>>>;
+}
+
+interface ProposalData {
+  id: string;
+  createdAt: string;
+  status: "pending" | "confirmed" | "rejected";
+  kind: "general" | "category";
+  category?: Category;
+  patch: Record<string, unknown>;
+  reason: string;
+  evidence: string[];
+  fingerprint: string;
+}
+
+interface MemorySummary {
+  hasProfile: boolean;
+  profileUpdated?: string;
+  decisions: number;
+  feedback: number;
+  savedProducts: number;
+  savedComparisons: number;
+  proposalsPending: number;
 }
 
 function formatInr(value: number): string {
@@ -473,6 +550,272 @@ function ProductImage({ url, merchant }: { url?: string; merchant: string }) {
   );
 }
 
+const DECISION_PRIORITIES = [
+  { id: "", label: "No preference" },
+  { id: "lowest-price", label: "Lowest price" },
+  { id: "best-value", label: "Best overall value" },
+  { id: "performance", label: "Performance" },
+  { id: "durability", label: "Durability" },
+  { id: "premium", label: "Premium quality" },
+] as const;
+
+interface GeneralDraft {
+  currency: string;
+  locale: string;
+  categories: Category[];
+  preferredBrands: string;
+  avoidedBrands: string;
+  preferredMerchants: string;
+  decisionPriority: string;
+}
+
+type CategoryField =
+  | "budgetMin"
+  | "budgetMax"
+  | "useCase"
+  | "performanceLevel"
+  | "minRamGb"
+  | "minStorageGb"
+  | "batteryPriority"
+  | "portability"
+  | "warrantyPriority"
+  | "sizes"
+  | "styles"
+  | "materials"
+  | "concerns"
+  | "notes";
+
+type CategoryDraft = Record<CategoryField, string>;
+
+const CATEGORY_FIELDS: Record<Category, CategoryField[]> = {
+  electronics: [
+    "budgetMin",
+    "budgetMax",
+    "useCase",
+    "performanceLevel",
+    "minRamGb",
+    "minStorageGb",
+    "batteryPriority",
+    "portability",
+    "warrantyPriority",
+    "notes",
+  ],
+  fashion: ["budgetMin", "budgetMax", "sizes", "styles", "materials", "notes"],
+  footwear: ["budgetMin", "budgetMax", "sizes", "useCase", "notes"],
+  beauty: ["budgetMin", "budgetMax", "concerns", "notes"],
+  "home-kitchen": ["budgetMin", "budgetMax", "useCase", "notes"],
+  general: ["budgetMin", "budgetMax", "notes"],
+};
+
+const CATEGORY_FIELD_LABELS: Record<CategoryField, string> = {
+  budgetMin: "Minimum budget (₹)",
+  budgetMax: "Maximum budget (₹)",
+  useCase: "Primary use",
+  performanceLevel: "Performance level",
+  minRamGb: "Minimum RAM (GB)",
+  minStorageGb: "Minimum storage (GB)",
+  batteryPriority: "Battery priority (0–1)",
+  portability: "Portability",
+  warrantyPriority: "Warranty priority (0–1)",
+  sizes: "Sizes (comma-separated)",
+  styles: "Styles (comma-separated)",
+  materials: "Materials (comma-separated)",
+  concerns: "Concerns (comma-separated)",
+  notes: "Notes",
+};
+
+function emptyGeneralDraft(): GeneralDraft {
+  return {
+    currency: "INR",
+    locale: "en-IN",
+    categories: [],
+    preferredBrands: "",
+    avoidedBrands: "",
+    preferredMerchants: "",
+    decisionPriority: "",
+  };
+}
+
+function emptyCategoryDraft(): CategoryDraft {
+  return {
+    budgetMin: "",
+    budgetMax: "",
+    useCase: "",
+    performanceLevel: "",
+    minRamGb: "",
+    minStorageGb: "",
+    batteryPriority: "",
+    portability: "",
+    warrantyPriority: "",
+    sizes: "",
+    styles: "",
+    materials: "",
+    concerns: "",
+    notes: "",
+  };
+}
+
+function parseCommaList(text: string): string[] {
+  return text
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function provenanceLabel(provenance: Provenance): string {
+  switch (provenance) {
+    case "explicit":
+      return "set by you";
+    case "confirmed":
+      return "confirmed suggestion";
+    case "inferred":
+      return "approved inference";
+  }
+}
+
+function formatSavedDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+  return date.toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function generalToDraft(value: GeneralValue): GeneralDraft {
+  return {
+    currency: value.currency,
+    locale: value.locale,
+    categories: [...value.categories],
+    preferredBrands: value.preferredBrands.join(", "),
+    avoidedBrands: value.avoidedBrands.join(", "),
+    preferredMerchants: value.preferredMerchants.join(", "),
+    decisionPriority: value.decisionPriority ?? "",
+  };
+}
+
+function categoryToDraft(value: CategoryValue | undefined): CategoryDraft {
+  const draft = emptyCategoryDraft();
+  if (!value) {
+    return draft;
+  }
+  draft.budgetMin = value.budgetInr?.min != null ? String(value.budgetInr.min) : "";
+  draft.budgetMax = value.budgetInr?.max != null ? String(value.budgetInr.max) : "";
+  draft.useCase = value.useCase ?? "";
+  draft.performanceLevel = value.performanceLevel ?? "";
+  draft.minRamGb = value.minRamGb != null ? String(value.minRamGb) : "";
+  draft.minStorageGb =
+    value.minStorageGb != null ? String(value.minStorageGb) : "";
+  draft.batteryPriority =
+    value.batteryPriority != null ? String(value.batteryPriority) : "";
+  draft.portability = value.portability ?? "";
+  draft.warrantyPriority =
+    value.warrantyPriority != null ? String(value.warrantyPriority) : "";
+  draft.sizes = value.sizes?.join(", ") ?? "";
+  draft.styles = value.styles?.join(", ") ?? "";
+  draft.materials = value.materials?.join(", ") ?? "";
+  draft.concerns = value.concerns?.join(", ") ?? "";
+  draft.notes = value.notes ?? "";
+  return draft;
+}
+
+function stringList(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      return null;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/** Human-readable lines for a proposal patch (unknown keys fall back raw). */
+function describeProposalPatch(patch: Record<string, unknown>): string[] {
+  const lines: string[] = [];
+  const brands = stringList(patch.preferredBrands);
+  if (brands) {
+    lines.push(`Prefer brands: ${brands.join(", ") || "—"}`);
+  }
+  const avoided = stringList(patch.avoidedBrands);
+  if (avoided) {
+    lines.push(`Avoid brands: ${avoided.join(", ") || "—"}`);
+  }
+  const merchants = stringList(patch.preferredMerchants);
+  if (merchants) {
+    lines.push(`Prefer merchants: ${merchants.join(", ") || "—"}`);
+  }
+  if (typeof patch.decisionPriority === "string") {
+    const label =
+      DECISION_PRIORITIES.find((p) => p.id === patch.decisionPriority)?.label ??
+      String(patch.decisionPriority);
+    lines.push(`Decide by: ${label}`);
+  }
+  if (typeof patch.currency === "string") {
+    lines.push(`Currency: ${patch.currency}`);
+  }
+  if (typeof patch.locale === "string") {
+    lines.push(`Locale: ${patch.locale}`);
+  }
+  const budget = patch.budgetInr as { min?: unknown; max?: unknown } | undefined;
+  if (budget && typeof budget === "object") {
+    if (typeof budget.max === "number") {
+      lines.push(
+        typeof budget.min === "number"
+          ? `Budget: ${formatInr(budget.min)} – ${formatInr(budget.max)}`
+          : `Budget up to ${formatInr(budget.max)}`,
+      );
+    } else if (typeof budget.min === "number") {
+      lines.push(`Budget from ${formatInr(budget.min)}`);
+    }
+  }
+  for (const [key, label] of [
+    ["useCase", "Use"],
+    ["performanceLevel", "Performance"],
+    ["portability", "Portability"],
+    ["notes", "Note"],
+  ] as const) {
+    if (typeof patch[key] === "string") {
+      lines.push(`${label}: ${patch[key] as string}`);
+    }
+  }
+  if (typeof patch.minRamGb === "number") {
+    lines.push(`At least ${patch.minRamGb} GB RAM`);
+  }
+  if (typeof patch.minStorageGb === "number") {
+    lines.push(`At least ${patch.minStorageGb} GB storage`);
+  }
+  if (typeof patch.batteryPriority === "number") {
+    lines.push(`Battery priority ${patch.batteryPriority}`);
+  }
+  if (typeof patch.warrantyPriority === "number") {
+    lines.push(`Warranty priority ${patch.warrantyPriority}`);
+  }
+  for (const [key, label] of [
+    ["sizes", "Sizes"],
+    ["styles", "Styles"],
+    ["materials", "Materials"],
+    ["concerns", "Concerns"],
+  ] as const) {
+    const list = stringList(patch[key]);
+    if (list) {
+      lines.push(`${label}: ${list.join(", ")}`);
+    }
+  }
+  if (lines.length === 0) {
+    for (const [key, value] of Object.entries(patch)) {
+      lines.push(`${key}: ${JSON.stringify(value) ?? "?"}`);
+    }
+  }
+  return lines;
+}
+
 export default function Home() {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<IntentResponse | null>(null);
@@ -513,6 +856,43 @@ export default function Home() {
   const intentRef = useRef<HTMLElement | null>(null);
   const stagesRef = useRef<HTMLOListElement | null>(null);
   const verdictRef = useRef<HTMLElement | null>(null);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const [proposalsOpen, setProposalsOpen] = useState(false);
+  const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [hasProfile, setHasProfile] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileNotice, setProfileNotice] = useState<string | null>(null);
+  const [generalDraft, setGeneralDraft] = useState<GeneralDraft>(emptyGeneralDraft);
+  const [catTab, setCatTab] = useState<Category>("electronics");
+  const [catDraft, setCatDraft] = useState<CategoryDraft>(emptyCategoryDraft);
+  const [catNotice, setCatNotice] = useState<string | null>(null);
+  const [catError, setCatError] = useState<string | null>(null);
+  const [savingGeneral, setSavingGeneral] = useState(false);
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [proposals, setProposals] = useState<ProposalData[]>([]);
+  const [proposalCount, setProposalCount] = useState(0);
+  const [proposalsLoading, setProposalsLoading] = useState(false);
+  const [proposalsError, setProposalsError] = useState<string | null>(null);
+  const [proposalsNotice, setProposalsNotice] = useState<string | null>(null);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [summary, setSummary] = useState<MemorySummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [useProfile, setUseProfile] = useState(true);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [savedDecisionId, setSavedDecisionId] = useState<string | null>(null);
+  const [helpfulVote, setHelpfulVote] = useState<boolean | null>(null);
+  const [votingHelpful, setVotingHelpful] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [preferId, setPreferId] = useState("");
+  const [rejectId, setRejectId] = useState("");
+  const [rejectReason, setRejectReason] = useState("");
+  const [purchasedId, setPurchasedId] = useState("");
+  const [feedbackSaving, setFeedbackSaving] = useState(false);
+  const [feedbackDone, setFeedbackDone] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -570,6 +950,34 @@ export default function Home() {
       scrollToElement(verdictRef.current);
     }
   }, [verdict]);
+
+  useEffect(() => {
+    if (!prefsOpen && !proposalsOpen) {
+      return;
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPrefsOpen(false);
+        setProposalsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [prefsOpen, proposalsOpen]);
+
+  /* eslint-disable react-hooks/exhaustive-deps -- one-shot bootstrap when the
+     signed-in user resolves; re-running on every render is not intended. */
+  useEffect(() => {
+    if (user) {
+      void loadSummary();
+    }
+  }, [user]);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   /* eslint-disable react-hooks/set-state-in-effect -- client-only restore
      from localStorage must run in an effect; reading it during render
@@ -704,6 +1112,16 @@ export default function Home() {
     setCompareIds([]);
     setShowCompare(false);
     setStage("idle");
+    setSaveState("idle");
+    setSavedDecisionId(null);
+    setHelpfulVote(null);
+    setFeedbackOpen(false);
+    setPreferId("");
+    setRejectId("");
+    setRejectReason("");
+    setPurchasedId("");
+    setFeedbackDone(false);
+    setFeedbackError(null);
   }
 
   async function analyze(text: string): Promise<void> {
@@ -720,6 +1138,7 @@ export default function Home() {
     setAllowOverBudget(false);
     setReviews(null);
     setReviewsError(null);
+    setUseProfile(true);
     clearDownstream();
     try {
       const response = await fetch("/api/intent", {
@@ -895,6 +1314,7 @@ export default function Home() {
           requirements: reqs?.requirements,
           weights: w,
           allowOverBudget: over,
+          personalize: useProfile,
           products: search.products,
           statuses: search.statuses,
           searchedAt: search.searchedAt,
@@ -926,6 +1346,603 @@ export default function Home() {
     }
     setUser(null);
     router.push("/login");
+  }
+
+  async function loadSummary(): Promise<void> {
+    setSummaryLoading(true);
+    setSummaryError(null);
+    setProfileError(null);
+    try {
+      const [profileRes, decRes, fbRes, spRes, scRes, propRes] =
+        await Promise.all([
+          fetch("/api/profile"),
+          fetch("/api/memory/decisions?limit=50"),
+          fetch("/api/memory/feedback?limit=50"),
+          fetch("/api/memory/saved/products"),
+          fetch("/api/memory/saved/comparisons"),
+          fetch("/api/memory/proposals"),
+        ]);
+      const responses = [profileRes, decRes, fbRes, spRes, scRes, propRes];
+      if (!responses.every((r) => r.ok)) {
+        throw new Error("Could not load saved data. Please try again.");
+      }
+      const [profileData, decData, fbData, spData, scData, propData] = (await Promise.all(
+        responses.map((r) => r.json()),
+      )) as [
+        { profile: ProfileData | null },
+        { decisions: unknown[] },
+        { feedback: unknown[] },
+        { products: unknown[] },
+        { comparisons: unknown[] },
+        { proposals: ProposalData[] },
+      ];
+      setProfile(profileData.profile);
+      setHasProfile(profileData.profile != null);
+      if (profileData.profile) {
+        setGeneralDraft(generalToDraft(profileData.profile.general.value));
+        setCatDraft(
+          categoryToDraft(profileData.profile.categories[catTab]?.value),
+        );
+      }
+      setSummary({
+        hasProfile: profileData.profile != null,
+        profileUpdated: profileData.profile?.general.updatedAt,
+        decisions: decData.decisions.length,
+        feedback: fbData.feedback.length,
+        savedProducts: spData.products.length,
+        savedComparisons: scData.comparisons.length,
+        proposalsPending: propData.proposals.length,
+      });
+      setProposals(propData.proposals);
+      setProposalCount(propData.proposals.length);
+    } catch (e) {
+      setSummaryError(
+        e instanceof Error ? e.message : "Could not load saved data.",
+      );
+    } finally {
+      setSummaryLoading(false);
+    }
+  }
+
+  function openPrefs(): void {
+    if (prefsOpen) {
+      setPrefsOpen(false);
+      return;
+    }
+    setProposalsOpen(false);
+    setPrefsOpen(true);
+    setProfileNotice(null);
+    setCatNotice(null);
+    setCatError(null);
+    void loadSummary();
+  }
+
+  function openProposals(): void {
+    if (proposalsOpen) {
+      setProposalsOpen(false);
+      return;
+    }
+    setPrefsOpen(false);
+    setProposalsOpen(true);
+    setProposalsNotice(null);
+    setProposalsError(null);
+    void loadProposals();
+  }
+
+  async function loadProposals(): Promise<void> {
+    setProposalsLoading(true);
+    setProposalsError(null);
+    try {
+      const response = await fetch("/api/memory/proposals");
+      const data = (await response.json()) as {
+        proposals?: ProposalData[];
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not load suggestions.");
+      }
+      setProposals(data.proposals ?? []);
+      setProposalCount((data.proposals ?? []).length);
+    } catch (e) {
+      setProposalsError(
+        e instanceof Error ? e.message : "Could not load suggestions.",
+      );
+    } finally {
+      setProposalsLoading(false);
+    }
+  }
+
+  async function saveGeneral(): Promise<void> {
+    if (savingGeneral) {
+      return;
+    }
+    const currency = generalDraft.currency.trim().toUpperCase();
+    if (currency !== "" && !/^[A-Z]{3}$/.test(currency)) {
+      setProfileError("Currency must be a 3-letter code like INR or USD.");
+      return;
+    }
+    setSavingGeneral(true);
+    setProfileError(null);
+    setProfileNotice(null);
+    try {
+      const body: Record<string, unknown> = {
+        preferredBrands: parseCommaList(generalDraft.preferredBrands),
+        avoidedBrands: parseCommaList(generalDraft.avoidedBrands),
+        preferredMerchants: parseCommaList(generalDraft.preferredMerchants),
+        categories: generalDraft.categories,
+      };
+      if (currency !== "") {
+        body.currency = currency;
+      }
+      if (generalDraft.locale.trim() !== "") {
+        body.locale = generalDraft.locale.trim();
+      }
+      if (generalDraft.decisionPriority !== "") {
+        body.decisionPriority = generalDraft.decisionPriority;
+      } else if (profile?.general.value.decisionPriority !== undefined) {
+        body.decisionPriority = null;
+      }
+      const response = await fetch("/api/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ general: body }),
+      });
+      const data = (await response.json()) as {
+        profile?: ProfileData;
+        error?: string;
+      };
+      if (!response.ok || !data.profile) {
+        throw new Error(data.error ?? "Could not save preferences.");
+      }
+      setProfile(data.profile);
+      setHasProfile(true);
+      setGeneralDraft(generalToDraft(data.profile.general.value));
+      setProfileNotice("Preferences saved.");
+    } catch (e) {
+      setProfileError(
+        e instanceof Error ? e.message : "Could not save preferences.",
+      );
+    } finally {
+      setSavingGeneral(false);
+    }
+  }
+
+  function buildCategoryPatch(): Record<string, unknown> {
+    const stored = profile?.categories[catTab]?.value;
+    const patch: Record<string, unknown> = {};
+    const numberOrNull = (
+      raw: string,
+      label: string,
+      opts?: { positive?: boolean; max?: number },
+    ): number | null => {
+      const trimmed = raw.trim();
+      if (trimmed === "") {
+        return null;
+      }
+      const value = Number(trimmed);
+      if (
+        !Number.isFinite(value) ||
+        value < 0 ||
+        (opts?.positive === true && value <= 0) ||
+        (opts?.max !== undefined && value > opts.max)
+      ) {
+        throw new Error(
+          `${label} must be a number${opts?.max !== undefined ? ` between 0 and ${opts.max}` : " ≥ 0"}.`,
+        );
+      }
+      return value;
+    };
+    const min = numberOrNull(catDraft.budgetMin, "Minimum budget");
+    const max = numberOrNull(catDraft.budgetMax, "Maximum budget", {
+      positive: true,
+    });
+    if (min != null && max != null && min > max) {
+      throw new Error("Minimum budget must not exceed the maximum.");
+    }
+    if (
+      (min ?? stored?.budgetInr?.min) !== stored?.budgetInr?.min ||
+      (max ?? stored?.budgetInr?.max) !== stored?.budgetInr?.max
+    ) {
+      patch.budgetInr =
+        min == null && max == null
+          ? null
+          : {
+              ...(min != null ? { min } : {}),
+              ...(max != null ? { max } : {}),
+            };
+    }
+    const text = (raw: string, current: string | undefined, key: string) => {
+      const trimmed = raw.trim();
+      if (trimmed !== "" && trimmed !== current) {
+        patch[key] = trimmed;
+      } else if (trimmed === "" && current !== undefined) {
+        patch[key] = null;
+      }
+    };
+    text(catDraft.useCase, stored?.useCase, "useCase");
+    text(catDraft.performanceLevel, stored?.performanceLevel, "performanceLevel");
+    text(catDraft.portability, stored?.portability, "portability");
+    text(catDraft.notes, stored?.notes, "notes");
+    const numeric = (
+      raw: string,
+      current: number | undefined,
+      key: string,
+      label: string,
+      opts?: { positive?: boolean; max?: number },
+    ) => {
+      const value = numberOrNull(raw, label, opts);
+      if (value !== current) {
+        patch[key] = value;
+      }
+    };
+    numeric(catDraft.minRamGb, stored?.minRamGb, "minRamGb", "Minimum RAM", {
+      positive: true,
+    });
+    numeric(
+      catDraft.minStorageGb,
+      stored?.minStorageGb,
+      "minStorageGb",
+      "Minimum storage",
+      { positive: true },
+    );
+    numeric(
+      catDraft.batteryPriority,
+      stored?.batteryPriority,
+      "batteryPriority",
+      "Battery priority",
+      { max: 1 },
+    );
+    numeric(
+      catDraft.warrantyPriority,
+      stored?.warrantyPriority,
+      "warrantyPriority",
+      "Warranty priority",
+      { max: 1 },
+    );
+    const list = (raw: string, current: string[] | undefined, key: string) => {
+      const next = parseCommaList(raw);
+      if (next.join("\n") !== (current ?? []).join("\n")) {
+        patch[key] = next;
+      }
+    };
+    list(catDraft.sizes, stored?.sizes, "sizes");
+    list(catDraft.styles, stored?.styles, "styles");
+    list(catDraft.materials, stored?.materials, "materials");
+    list(catDraft.concerns, stored?.concerns, "concerns");
+    return patch;
+  }
+
+  async function saveCategory(): Promise<void> {
+    if (savingCategory) {
+      return;
+    }
+    let patch: Record<string, unknown>;
+    try {
+      patch = buildCategoryPatch();
+    } catch (e) {
+      setCatError(e instanceof Error ? e.message : "Invalid preferences.");
+      return;
+    }
+    if (Object.keys(patch).length === 0) {
+      setCatNotice("No changes to save.");
+      return;
+    }
+    setSavingCategory(true);
+    setCatError(null);
+    setCatNotice(null);
+    try {
+      const response = await fetch(`/api/profile/${catTab}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preferences: patch }),
+      });
+      const data = (await response.json()) as {
+        preferences?: StoredSection<CategoryValue>;
+        error?: string;
+      };
+      if (!response.ok || !data.preferences) {
+        throw new Error(data.error ?? "Could not save preferences.");
+      }
+      setProfile((prev) =>
+        prev
+          ? {
+              ...prev,
+              categories: {
+                ...prev.categories,
+                [catTab]: data.preferences as StoredSection<CategoryValue>,
+              },
+            }
+          : prev,
+      );
+      setHasProfile(true);
+      setCatDraft(categoryToDraft(data.preferences.value));
+      setCatNotice(`${categoryLabel(catTab)} preferences saved.`);
+    } catch (e) {
+      setCatError(
+        e instanceof Error ? e.message : "Could not save preferences.",
+      );
+    } finally {
+      setSavingCategory(false);
+    }
+  }
+
+  function switchCatTab(tab: Category): void {
+    setCatTab(tab);
+    setCatDraft(categoryToDraft(profile?.categories[tab]?.value));
+    setCatNotice(null);
+    setCatError(null);
+  }
+
+  async function clearHistory(): Promise<void> {
+    if (
+      !window.confirm(
+        "Clear your decision history, feedback, and suggestions? Saved products and preferences are kept.",
+      )
+    ) {
+      return;
+    }
+    setSummaryError(null);
+    try {
+      const response = await fetch("/api/memory/history", { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error("Could not clear history. Please try again.");
+      }
+      await loadSummary();
+    } catch (e) {
+      setSummaryError(e instanceof Error ? e.message : "Could not clear history.");
+    }
+  }
+
+  async function clearProfile(): Promise<void> {
+    if (
+      !window.confirm(
+        "Delete all your saved preferences? This cannot be undone. Your decision history is kept.",
+      )
+    ) {
+      return;
+    }
+    setProfileError(null);
+    try {
+      const response = await fetch("/api/profile", { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error("Could not delete preferences. Please try again.");
+      }
+      setProfile(null);
+      setHasProfile(false);
+      setGeneralDraft(emptyGeneralDraft());
+      setCatDraft(emptyCategoryDraft());
+      setProfileNotice("Preferences deleted.");
+      await loadSummary();
+    } catch (e) {
+      setProfileError(
+        e instanceof Error ? e.message : "Could not delete preferences.",
+      );
+    }
+  }
+
+  async function decideProposal(
+    id: string,
+    decision: "confirmed" | "rejected",
+    patch?: Record<string, unknown>,
+  ): Promise<void> {
+    if (decidingId) {
+      return;
+    }
+    setDecidingId(id);
+    setProposalsError(null);
+    try {
+      const response = await fetch("/api/memory/proposals/decide", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          patch === undefined ? { id, decision } : { id, decision, patch },
+        ),
+      });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not save your choice.");
+      }
+      setProposals((prev) => prev.filter((p) => p.id !== id));
+      setProposalCount((count) => Math.max(0, count - 1));
+      setEditingId(null);
+      setProposalsNotice(
+        decision === "confirmed"
+          ? "Saved to your preferences."
+          : "Dismissed — we won't ask about this again.",
+      );
+      if (decision === "confirmed") {
+        await loadSummary();
+      }
+    } catch (e) {
+      setProposalsError(
+        e instanceof Error ? e.message : "Could not save your choice.",
+      );
+    } finally {
+      setDecidingId(null);
+    }
+  }
+
+  function editPrefill(patch: Record<string, unknown>): {
+    label: string;
+    value: string;
+  } | null {
+    const brands = stringList(patch.preferredBrands);
+    if (brands) {
+      return { label: "Brands (comma-separated)", value: brands.join(", ") };
+    }
+    const avoided = stringList(patch.avoidedBrands);
+    if (avoided) {
+      return { label: "Brands (comma-separated)", value: avoided.join(", ") };
+    }
+    const budget = patch.budgetInr as { max?: unknown } | undefined;
+    if (budget && typeof budget === "object" && typeof budget.max === "number") {
+      return { label: "Maximum budget (₹)", value: String(budget.max) };
+    }
+    return null;
+  }
+
+  function confirmEdited(proposal: ProposalData): void {
+    const patch = proposal.patch;
+    if (stringList(patch.preferredBrands)) {
+      const brands = parseCommaList(editValue);
+      if (brands.length === 0) {
+        setProposalsError("Enter at least one brand, or reject the suggestion.");
+        return;
+      }
+      void decideProposal(proposal.id, "confirmed", {
+        ...patch,
+        preferredBrands: brands,
+      });
+      return;
+    }
+    if (stringList(patch.avoidedBrands)) {
+      const brands = parseCommaList(editValue);
+      if (brands.length === 0) {
+        setProposalsError("Enter at least one brand, or reject the suggestion.");
+        return;
+      }
+      void decideProposal(proposal.id, "confirmed", {
+        ...patch,
+        avoidedBrands: brands,
+      });
+      return;
+    }
+    const budget = patch.budgetInr as { max?: unknown } | undefined;
+    if (budget && typeof budget === "object") {
+      const max = Number(editValue.trim());
+      if (!Number.isFinite(max) || max <= 0) {
+        setProposalsError("Enter a maximum budget above ₹0.");
+        return;
+      }
+      void decideProposal(proposal.id, "confirmed", {
+        ...patch,
+        budgetInr: { max },
+      });
+    }
+  }
+
+  async function saveCurrentDecision(): Promise<void> {
+    if (
+      !verdict ||
+      !effectiveCategory ||
+      !result ||
+      saveState === "saving" ||
+      saveState === "saved"
+    ) {
+      return;
+    }
+    setSaveState("saving");
+    try {
+      const top = verdict.ranked[0]?.product ?? null;
+      const response = await fetch("/api/memory/decisions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: result.intent.query,
+          category: effectiveCategory,
+          ...(verdict.intent?.budgetInr
+            ? { budgetInr: verdict.intent.budgetInr }
+            : {}),
+          topPick: top
+            ? {
+                productId: top.id,
+                title: top.title,
+                merchant: top.merchant,
+                ...(top.priceInr != null ? { priceInr: top.priceInr } : {}),
+              }
+            : null,
+          verdict: verdict.recommendation.verdict,
+          ...(verdict.personalization?.applied &&
+          verdict.personalization.applied.length > 0
+            ? { personalizationApplied: verdict.personalization.applied }
+            : {}),
+        }),
+      });
+      const data = (await response.json()) as {
+        decision?: { id: string };
+        error?: string;
+      };
+      if (!response.ok || !data.decision) {
+        throw new Error(data.error ?? "Could not save this decision.");
+      }
+      setSavedDecisionId(data.decision.id);
+      setSaveState("saved");
+    } catch {
+      setSaveState("error");
+    }
+  }
+
+  async function voteHelpful(value: boolean): Promise<void> {
+    if (votingHelpful || helpfulVote !== null) {
+      return;
+    }
+    setVotingHelpful(true);
+    setFeedbackError(null);
+    try {
+      const response = await fetch("/api/memory/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(savedDecisionId ? { decisionId: savedDecisionId } : {}),
+          helpful: value,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Could not save your vote. Please try again.");
+      }
+      setHelpfulVote(value);
+    } catch (e) {
+      setFeedbackError(
+        e instanceof Error ? e.message : "Could not save your vote.",
+      );
+    } finally {
+      setVotingHelpful(false);
+    }
+  }
+
+  async function submitFeedbackDetails(): Promise<void> {
+    if (!verdict || feedbackSaving || feedbackDone) {
+      return;
+    }
+    const findProduct = (id: string) =>
+      verdict.ranked.find((item) => item.product.id === id)?.product ?? null;
+    const preferred = preferId ? findProduct(preferId) : null;
+    const rejected = rejectId ? findProduct(rejectId) : null;
+    const purchased = purchasedId ? findProduct(purchasedId) : null;
+    const reason = rejectReason.trim();
+    if (!preferred && !rejected && !purchased && reason === "") {
+      return;
+    }
+    setFeedbackSaving(true);
+    setFeedbackError(null);
+    try {
+      const snapshot = (p: Product) => ({
+        productId: p.id,
+        title: p.title,
+        merchant: p.merchant,
+      });
+      const response = await fetch("/api/memory/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(savedDecisionId ? { decisionId: savedDecisionId } : {}),
+          ...(preferred ? { preferred: snapshot(preferred) } : {}),
+          ...(rejected ? { rejected: snapshot(rejected) } : {}),
+          ...(purchased ? { purchased: snapshot(purchased) } : {}),
+          ...(reason !== "" ? { rejectionReason: reason } : {}),
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Could not save your feedback. Please try again.");
+      }
+      setFeedbackDone(true);
+    } catch (e) {
+      setFeedbackError(
+        e instanceof Error ? e.message : "Could not save your feedback.",
+      );
+    } finally {
+      setFeedbackSaving(false);
+    }
   }
 
   async function fetchReviews(): Promise<void> {
@@ -1022,6 +2039,7 @@ export default function Home() {
           requirements: reqs?.requirements,
           weights: normalizeWeights(weights),
           allowOverBudget,
+          personalize: useProfile,
           products: searchData.products,
           statuses: searchData.statuses,
           searchedAt: searchData.searchedAt,
@@ -1112,6 +2130,71 @@ export default function Home() {
       ? cards.find((c) => c.product.id === verdict.recommendation.productId)?.product ?? null
       : null;
 
+  function renderCategoryField(field: CategoryField): ReactNode {
+    const label = CATEGORY_FIELD_LABELS[field];
+    const value = catDraft[field];
+    const set = (next: string) =>
+      setCatDraft((prev) => ({ ...prev, [field]: next }));
+    const inputClass =
+      "mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none";
+    if (field === "performanceLevel") {
+      return (
+        <label key={field} className="block text-xs text-stone-400">
+          {label}
+          <select
+            value={value}
+            onChange={(event) => set(event.target.value)}
+            className={inputClass}
+          >
+            <option value="">Not set</option>
+            <option value="basic">Basic</option>
+            <option value="balanced">Balanced</option>
+            <option value="high">High</option>
+            <option value="workstation">Workstation</option>
+          </select>
+        </label>
+      );
+    }
+    if (field === "portability") {
+      return (
+        <label key={field} className="block text-xs text-stone-400">
+          {label}
+          <select
+            value={value}
+            onChange={(event) => set(event.target.value)}
+            className={inputClass}
+          >
+            <option value="">Not set</option>
+            <option value="desk">Mostly desk-bound</option>
+            <option value="balanced">Balanced</option>
+            <option value="ultralight">Ultralight</option>
+          </select>
+        </label>
+      );
+    }
+    const numeric = [
+      "budgetMin",
+      "budgetMax",
+      "minRamGb",
+      "minStorageGb",
+      "batteryPriority",
+      "warrantyPriority",
+    ].includes(field);
+    return (
+      <label key={field} className="block text-xs text-stone-400">
+        {label}
+        <input
+          type="text"
+          inputMode={numeric ? "decimal" : "text"}
+          value={value}
+          onChange={(event) => set(event.target.value)}
+          placeholder="Not set"
+          className={inputClass}
+        />
+      </label>
+    );
+  }
+
   if (!authChecked) {
     return (
       <main className="relative mx-auto flex min-h-screen max-w-3xl flex-col items-center justify-center px-4 text-stone-500">
@@ -1189,6 +2272,522 @@ export default function Home() {
           never guesses.
         </p>
       </header>
+      {user && (
+        <div className="fixed top-1/2 right-0 z-50 flex -translate-y-1/2 flex-col gap-2">
+          <button
+            type="button"
+            onClick={openPrefs}
+            aria-expanded={prefsOpen}
+            aria-label="Preferences"
+            className={
+              prefsOpen
+                ? "rounded-l-lg border border-r-0 border-teal-300/50 bg-teal-300/10 px-3 py-6 shadow-lg backdrop-blur-xl"
+                : "rounded-l-lg border border-r-0 border-white/15 bg-stone-950/90 px-3 py-6 shadow-lg backdrop-blur-xl transition hover:border-teal-300/50"
+            }
+          >
+            <span className="[writing-mode:vertical-rl] rotate-180 text-sm font-semibold tracking-wide text-stone-200">
+              Preferences
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={openProposals}
+            aria-expanded={proposalsOpen}
+            aria-label={
+              proposalCount > 0
+                ? `Suggestions, ${proposalCount} pending`
+                : "Suggestions"
+            }
+            className={
+              proposalsOpen
+                ? "rounded-l-lg border border-r-0 border-teal-300/50 bg-teal-300/10 px-3 py-6 shadow-lg backdrop-blur-xl"
+                : "rounded-l-lg border border-r-0 border-white/15 bg-stone-950/90 px-3 py-6 shadow-lg backdrop-blur-xl transition hover:border-teal-300/50"
+            }
+          >
+            <span className="[writing-mode:vertical-rl] rotate-180 text-sm font-semibold tracking-wide text-stone-200">
+              {proposalCount > 0 ? `Suggestions (${proposalCount})` : "Suggestions"}
+            </span>
+          </button>
+        </div>
+      )}
+
+      {(prefsOpen || proposalsOpen) && (
+        <button
+          type="button"
+          aria-label="Close panel"
+          onClick={() => {
+            setPrefsOpen(false);
+            setProposalsOpen(false);
+          }}
+          className="fixed inset-0 z-40 h-full w-full cursor-default bg-black/60"
+        />
+      )}
+      {(prefsOpen || proposalsOpen) && (
+        <section
+          aria-label={prefsOpen ? "Preferences" : "Suggestions"}
+          role="dialog"
+          aria-modal="true"
+          className="fixed top-0 right-0 z-40 h-full w-full max-w-lg overflow-y-auto border-l border-white/10 bg-stone-950/95 p-5 pr-12 shadow-2xl backdrop-blur-xl motion-safe:animate-[drawer-in_0.25s_ease-out]"
+        >
+          {prefsOpen ? (
+            <div>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-stone-100">
+                    Your preferences
+                  </h2>
+                  <p className="mt-1 text-xs text-stone-500">
+                    Saved preferences personalize future recommendations.
+                    Your current request always wins over anything saved.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPrefsOpen(false)}
+                  className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                >
+                  Close
+                </button>
+              </div>
+              {summaryLoading ? (
+                <p className="mt-4 text-sm text-stone-500">Loading…</p>
+              ) : (
+                <>
+                  <div className="mt-4">
+                    <h3 className="text-sm font-semibold text-stone-200">
+                      General
+                    </h3>
+                    {profile && (
+                      <p className="mt-1 text-xs text-stone-500">
+                        Saved {formatSavedDate(profile.general.updatedAt)} ·{" "}
+                        {provenanceLabel(profile.general.provenance)}
+                      </p>
+                    )}
+                    <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                      <label className="block text-xs text-stone-400">
+                        Currency
+                        <input
+                          type="text"
+                          value={generalDraft.currency}
+                          onChange={(event) =>
+                            setGeneralDraft((prev) => ({
+                              ...prev,
+                              currency: event.target.value,
+                            }))
+                          }
+                          placeholder="INR"
+                          maxLength={3}
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 uppercase placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                        />
+                      </label>
+                      <label className="block text-xs text-stone-400">
+                        Locale
+                        <input
+                          type="text"
+                          value={generalDraft.locale}
+                          onChange={(event) =>
+                            setGeneralDraft((prev) => ({
+                              ...prev,
+                              locale: event.target.value,
+                            }))
+                          }
+                          placeholder="en-IN"
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                        />
+                      </label>
+                      <label className="block text-xs text-stone-400">
+                        Decide by
+                        <select
+                          value={generalDraft.decisionPriority}
+                          onChange={(event) =>
+                            setGeneralDraft((prev) => ({
+                              ...prev,
+                              decisionPriority: event.target.value,
+                            }))
+                          }
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                        >
+                          {DECISION_PRIORITIES.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <div className="mt-3">
+                      <p className="text-xs text-stone-400">
+                        Categories you shop
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap gap-2">
+                        {CATEGORIES.map((c) => {
+                          const active =
+                            generalDraft.categories.includes(c.id);
+                          return (
+                            <button
+                              key={c.id}
+                              type="button"
+                              aria-pressed={active}
+                              onClick={() =>
+                                setGeneralDraft((prev) => ({
+                                  ...prev,
+                                  categories: active
+                                    ? prev.categories.filter(
+                                        (id) => id !== c.id,
+                                      )
+                                    : [...prev.categories, c.id],
+                                }))
+                              }
+                              className={
+                                active
+                                  ? "rounded-full bg-teal-300 px-3 py-1.5 text-xs font-semibold text-teal-950"
+                                  : "rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-stone-300 hover:border-white/30"
+                              }
+                            >
+                              {c.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                      <label className="block text-xs text-stone-400">
+                        Preferred brands (comma-separated)
+                        <input
+                          type="text"
+                          value={generalDraft.preferredBrands}
+                          onChange={(event) =>
+                            setGeneralDraft((prev) => ({
+                              ...prev,
+                              preferredBrands: event.target.value,
+                            }))
+                          }
+                          placeholder="Sony, Bose"
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                        />
+                      </label>
+                      <label className="block text-xs text-stone-400">
+                        Avoided brands (comma-separated)
+                        <input
+                          type="text"
+                          value={generalDraft.avoidedBrands}
+                          onChange={(event) =>
+                            setGeneralDraft((prev) => ({
+                              ...prev,
+                              avoidedBrands: event.target.value,
+                            }))
+                          }
+                          placeholder="Acme"
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                        />
+                      </label>
+                      <label className="block text-xs text-stone-400">
+                        Preferred stores (comma-separated)
+                        <input
+                          type="text"
+                          value={generalDraft.preferredMerchants}
+                          onChange={(event) =>
+                            setGeneralDraft((prev) => ({
+                              ...prev,
+                              preferredMerchants: event.target.value,
+                            }))
+                          }
+                          placeholder="Amazon India, Flipkart"
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                        />
+                      </label>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void saveGeneral()}
+                        disabled={savingGeneral}
+                        className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {savingGeneral ? "Saving…" : "Save general"}
+                      </button>
+                      {profileNotice && (
+                        <span className="text-xs text-teal-200">
+                          {profileNotice}
+                        </span>
+                      )}
+                    </div>
+                    {profileError && (
+                      <p className="mt-2 rounded-lg border border-red-400/30 bg-red-500/10 p-2.5 text-xs text-red-200">
+                        {profileError}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="mt-6 border-t border-white/10 pt-4">
+                    <h3 className="text-sm font-semibold text-stone-200">
+                      Category preferences
+                    </h3>
+                    <div
+                      className="mt-2 flex flex-wrap gap-2"
+                      role="group"
+                      aria-label="Preference category"
+                    >
+                      {CATEGORIES.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          aria-pressed={catTab === c.id}
+                          onClick={() => switchCatTab(c.id)}
+                          className={
+                            catTab === c.id
+                              ? "rounded-full bg-teal-300 px-3 py-1.5 text-xs font-semibold text-teal-950"
+                              : "rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-stone-300 hover:border-white/30"
+                          }
+                        >
+                          {c.label}
+                        </button>
+                      ))}
+                    </div>
+                    {profile?.categories[catTab] && (
+                      <p className="mt-2 text-xs text-stone-500">
+                        Saved{" "}
+                        {formatSavedDate(
+                          (profile.categories[catTab] as StoredSection<CategoryValue>)
+                            .updatedAt,
+                        )}{" "}
+                        ·{" "}
+                        {provenanceLabel(
+                          (profile.categories[catTab] as StoredSection<CategoryValue>)
+                            .provenance,
+                        )}
+                      </p>
+                    )}
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      {CATEGORY_FIELDS[catTab].map((field) =>
+                        renderCategoryField(field),
+                      )}
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void saveCategory()}
+                        disabled={savingCategory}
+                        className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {savingCategory
+                          ? "Saving…"
+                          : `Save ${categoryLabel(catTab).toLowerCase()}`}
+                      </button>
+                      {catNotice && (
+                        <span className="text-xs text-teal-200">{catNotice}</span>
+                      )}
+                    </div>
+                    {catError && (
+                      <p className="mt-2 rounded-lg border border-red-400/30 bg-red-500/10 p-2.5 text-xs text-red-200">
+                        {catError}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="mt-6 border-t border-white/10 pt-4">
+                    <h3 className="text-sm font-semibold text-stone-200">
+                      Your saved data
+                    </h3>
+                    {summaryError ? (
+                      <p className="mt-2 text-xs text-red-200">{summaryError}</p>
+                    ) : summary ? (
+                      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-stone-400 sm:grid-cols-3">
+                        <div className="flex justify-between gap-2">
+                          <dt>Preferences</dt>
+                          <dd className="text-stone-200">
+                            {summary.hasProfile ? "saved" : "none yet"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Decisions</dt>
+                          <dd className="text-stone-200">{summary.decisions}</dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Feedback</dt>
+                          <dd className="text-stone-200">{summary.feedback}</dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Saved products</dt>
+                          <dd className="text-stone-200">
+                            {summary.savedProducts}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Comparisons</dt>
+                          <dd className="text-stone-200">
+                            {summary.savedComparisons}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Suggestions</dt>
+                          <dd className="text-stone-200">
+                            {summary.proposalsPending} pending
+                          </dd>
+                        </div>
+                      </dl>
+                    ) : (
+                      <p className="mt-2 text-xs text-stone-500">Loading…</p>
+                    )}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void clearHistory()}
+                        className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                      >
+                        Clear decision history
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void clearProfile()}
+                        className="rounded-lg border border-rose-300/30 bg-rose-400/5 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:border-rose-300/60"
+                      >
+                        Delete all preferences
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <div>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-stone-100">
+                    Suggestions for you
+                  </h2>
+                  <p className="mt-1 text-xs text-stone-500">
+                    Patterns Wisora noticed in your decisions. Nothing is
+                    saved until you confirm it.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setProposalsOpen(false)}
+                  className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                >
+                  Close
+                </button>
+              </div>
+              {proposalsLoading ? (
+                <p className="mt-4 text-sm text-stone-500">Loading…</p>
+              ) : proposalsError ? (
+                <p className="mt-4 rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-200">
+                  {proposalsError}
+                </p>
+              ) : proposals.length === 0 ? (
+                <p className="mt-4 text-sm text-stone-400">
+                  No suggestions right now. Save decisions, and use “Tell us
+                  more” to mark picks you prefer or reject — Wisora will
+                  propose matching preferences here for your approval.
+                  Budget patterns take a couple of similar searches.
+                </p>
+              ) : (
+                <ul className="mt-4 space-y-3">
+                  {proposals.map((proposal) => {
+                    const editable = editPrefill(proposal.patch);
+                    const busy = decidingId === proposal.id;
+                    return (
+                      <li
+                        key={proposal.id}
+                        className="rounded-xl border border-white/10 bg-white/[0.03] p-4"
+                      >
+                        <p className="text-sm font-medium text-stone-100">
+                          {proposal.reason}
+                        </p>
+                        <ul className="mt-1.5 space-y-0.5 text-sm text-stone-300">
+                          {describeProposalPatch(proposal.patch).map((line) => (
+                            <li key={line}>· {line}</li>
+                          ))}
+                        </ul>
+                        <p className="mt-1.5 text-xs text-stone-500">
+                          {proposal.kind === "category" && proposal.category
+                            ? `${categoryLabel(proposal.category)} · `
+                            : ""}
+                          Based on {proposal.evidence.length} past decision
+                          {proposal.evidence.length === 1 ? "" : "s"}
+                        </p>
+                        {editingId === proposal.id && editable ? (
+                          <div className="mt-3">
+                            <label className="block text-xs text-stone-400">
+                              {editable.label}
+                              <input
+                                type="text"
+                                value={editValue}
+                                onChange={(event) =>
+                                  setEditValue(event.target.value)
+                                }
+                                className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                              />
+                            </label>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => confirmEdited(proposal)}
+                                className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {busy ? "Saving…" : "Save edited"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingId(null)}
+                                className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() =>
+                                void decideProposal(proposal.id, "confirmed")
+                              }
+                              className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {busy ? "Saving…" : "Confirm"}
+                            </button>
+                            {editable && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => {
+                                  setEditingId(proposal.id);
+                                  setEditValue(editable.value);
+                                  setProposalsError(null);
+                                }}
+                                className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                              >
+                                Edit
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() =>
+                                void decideProposal(proposal.id, "rejected")
+                              }
+                              className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {proposalsNotice && (
+                <p className="mt-3 text-xs text-teal-200">{proposalsNotice}</p>
+              )}
+            </div>
+          )}
+        </section>
+      )}
 
       <section aria-label="Describe your need">
         <form
@@ -1572,6 +3171,17 @@ export default function Home() {
                       : "Answer the quick questions above to enable search."}
                 </p>
               )}
+              {hasProfile && (
+                <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-stone-400">
+                  <input
+                    type="checkbox"
+                    checked={useProfile}
+                    onChange={() => setUseProfile((v) => !v)}
+                    className="h-4 w-4 accent-teal-300"
+                  />
+                  Use my saved preferences for this search
+                </label>
+              )}
 
               {stage !== "idle" && (
                 <ol ref={stagesRef} className="mt-4 scroll-mt-4" aria-label="Research progress">
@@ -1726,6 +3336,194 @@ export default function Home() {
                 </ul>
               </div>
             )}
+            {verdict.personalization?.enabled ? (
+              <div className="mt-3 rounded-xl border border-teal-300/25 bg-teal-300/5 p-3">
+                <h3 className="text-sm font-semibold text-teal-200">
+                  Personalized for you
+                </h3>
+                {verdict.personalization.applied.length > 0 ? (
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-stone-300">
+                    {verdict.personalization.applied.map((note) => (
+                      <li key={note}>{note}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-xs text-stone-400">
+                    Your profile was checked; nothing in it applied to this
+                    query.
+                  </p>
+                )}
+                {verdict.personalization.skipped.length > 0 && (
+                  <details className="mt-1.5">
+                    <summary className="cursor-pointer text-xs text-stone-500">
+                      {verdict.personalization.skipped.length} saved{" "}
+                      {verdict.personalization.skipped.length === 1
+                        ? "preference"
+                        : "preferences"}{" "}
+                      not used
+                    </summary>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-stone-500">
+                      {verdict.personalization.skipped.map((note) => (
+                        <li key={note}>{note}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            ) : (
+              verdict.personalization?.reason === "no-profile" && (
+                <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                  <p className="text-xs text-stone-400">
+                    Save your preferences once, and future recommendations
+                    will reflect them.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={openPrefs}
+                    className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-200 transition hover:border-teal-300/50 hover:text-teal-200"
+                  >
+                    Set preferences
+                  </button>
+                </div>
+              )
+            )}
+            <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void saveCurrentDecision()}
+                  disabled={saveState === "saving" || saveState === "saved"}
+                  className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-200 transition hover:border-teal-300/50 hover:text-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {saveState === "saved"
+                    ? "Saved ✓"
+                    : saveState === "saving"
+                      ? "Saving…"
+                      : saveState === "error"
+                        ? "Save failed — retry"
+                        : "Save this decision"}
+                </button>
+                <div
+                  className="flex items-center gap-1.5"
+                  role="group"
+                  aria-label="Was this helpful?"
+                >
+                  <span className="text-xs text-stone-500">Helpful?</span>
+                  <button
+                    type="button"
+                    aria-pressed={helpfulVote === true}
+                    disabled={helpfulVote !== null || votingHelpful}
+                    onClick={() => void voteHelpful(true)}
+                    className={
+                      helpfulVote === true
+                        ? "rounded-md bg-teal-300 px-2.5 py-1 text-xs font-semibold text-teal-950"
+                        : "rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    }
+                  >
+                    Yes
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={helpfulVote === false}
+                    disabled={helpfulVote !== null || votingHelpful}
+                    onClick={() => void voteHelpful(false)}
+                    className={
+                      helpfulVote === false
+                        ? "rounded-md bg-teal-300 px-2.5 py-1 text-xs font-semibold text-teal-950"
+                        : "rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    }
+                  >
+                    No
+                  </button>
+                </div>
+                {helpfulVote !== null && (
+                  <span className="text-xs text-teal-200">
+                    Thanks for the feedback.
+                  </span>
+                )}
+              </div>
+              {feedbackDone ? (
+                <p className="mt-2 text-xs text-teal-200">
+                  Thanks — recorded. Patterns in your feedback may surface as
+                  suggestions.
+                </p>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setFeedbackOpen((v) => !v)}
+                    aria-expanded={feedbackOpen}
+                    className="mt-2 text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                  >
+                    {feedbackOpen ? "Hide details" : "Tell us more"}
+                  </button>
+                  {feedbackOpen && (
+                    <div className="mt-2">
+                      <div className="grid gap-2 sm:grid-cols-3">
+                        {(
+                          [
+                            ["You prefer", preferId, setPreferId],
+                            ["Not for you", rejectId, setRejectId],
+                            ["You bought", purchasedId, setPurchasedId],
+                          ] as const
+                        ).map(([label, value, setValue]) => (
+                          <label
+                            key={label}
+                            className="block text-xs text-stone-400"
+                          >
+                            {label}
+                            <select
+                              value={value}
+                              onChange={(event) =>
+                                setValue(event.target.value)
+                              }
+                              className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2 text-xs text-stone-100 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                            >
+                              <option value="">—</option>
+                              {verdict.ranked.slice(0, 5).map((item, i) => (
+                                <option key={item.product.id} value={item.product.id}>
+                                  #{i + 1} {item.product.title}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ))}
+                      </div>
+                      <label className="mt-2 block text-xs text-stone-400">
+                        Why not? (optional)
+                        <input
+                          type="text"
+                          value={rejectReason}
+                          onChange={(event) =>
+                            setRejectReason(event.target.value)
+                          }
+                          placeholder="e.g. overpriced for the features"
+                          maxLength={500}
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2 text-xs text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void submitFeedbackDetails()}
+                        disabled={
+                          feedbackSaving ||
+                          (!preferId &&
+                            !rejectId &&
+                            !purchasedId &&
+                            rejectReason.trim() === "")
+                        }
+                        className="mt-2 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {feedbackSaving ? "Saving…" : "Submit feedback"}
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+              {feedbackError && (
+                <p className="mt-2 text-xs text-red-200">{feedbackError}</p>
+              )}
+            </div>
           </section>
         )}
 
@@ -2141,7 +3939,7 @@ export default function Home() {
                           {analysis.checks.map((check) => (
                             <li
                               key={check.key}
-                              title={`${check.kind}: ${check.status}`}
+                              title={`${check.kind}: ${check.status}${check.key.startsWith("profile:") ? " · from your saved preferences" : ""}`}
                               className={
                                 check.status === "met"
                                   ? "rounded-full border border-teal-300/30 bg-teal-300/10 px-2 py-0.5 text-teal-200"
@@ -2309,6 +4107,11 @@ export default function Home() {
                           {pros.slice(0, 2).map((r) => (
                             <li key={r.text} className="text-teal-300">
                               + {r.text}
+                              {r.source === "profile" && (
+                                <span className="ml-1.5 rounded-full border border-teal-300/30 bg-teal-300/10 px-1.5 py-px align-middle text-[10px] font-semibold text-teal-200">
+                                  saved
+                                </span>
+                              )}
                             </li>
                           ))}
                           {cons.slice(0, 2).map((r) => (

@@ -1,5 +1,6 @@
 import { matchRequirement } from "../eligibility/filter";
 import type { Intent } from "../intent/types";
+import { PROFILE_KEY_PREFIX } from "../memory/profile";
 import type { Product } from "../products/schema";
 import type { RequirementSet } from "../requirements/types";
 import { contentTokens } from "../text/tokens";
@@ -11,6 +12,11 @@ export type ReasonSentiment = "pro" | "con" | "info";
 export interface ScoreReason {
   text: string;
   sentiment: ReasonSentiment;
+  /**
+   * Marks preference matches driven by saved profile preferences.
+   * Absent for current-request reasons; older clients ignore it.
+   */
+  source?: "query" | "profile";
 }
 
 export interface ScoreBreakdown {
@@ -99,26 +105,34 @@ function scoreWantsFraction(
   const text = `${product.title} ${product.snippet}`;
   let matched = 0;
   let total = 0;
-  const matchedLabels: string[] = [];
-  let firstMissed: string | null = null;
+  const matchedLabels: Array<{ label: string; source?: "profile" }> = [];
+  let firstMissed: { label: string; source?: "profile" } | null = null;
   for (const want of wants) {
     total += want.importance;
+    const source = want.key.startsWith(PROFILE_KEY_PREFIX)
+      ? ("profile" as const)
+      : undefined;
     if (matchRequirement(want, text) === "met") {
       matched += want.importance;
       if (matchedLabels.length < 2) {
-        matchedLabels.push(want.label);
+        matchedLabels.push({ label: want.label, source });
       }
     } else if (!firstMissed) {
-      firstMissed = want.label;
+      firstMissed = { label: want.label, source };
     }
   }
-  for (const label of matchedLabels) {
-    reasons.push({ text: `Matches preference: ${label}.`, sentiment: "pro" });
+  for (const { label, source } of matchedLabels) {
+    reasons.push({
+      text: `Matches preference: ${label}.`,
+      sentiment: "pro",
+      ...(source ? { source } : {}),
+    });
   }
   if (firstMissed) {
     reasons.push({
-      text: `Missing preference: ${firstMissed}.`,
+      text: `Missing preference: ${firstMissed.label}.`,
       sentiment: "info",
+      ...(firstMissed.source ? { source: firstMissed.source } : {}),
     });
   }
   return total > 0 ? matched / total : 1;

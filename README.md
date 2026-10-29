@@ -6,9 +6,10 @@ shopping sources, compares real options, and gives a reasoned BUY / WAIT /
 AVOID recommendation with traceable links. It never invents products, prices,
 or reviews.
 
-Status: Phase 3 complete — review intelligence and trust layer on top of
-the Phase 2 decision engine: on-demand review retrieval, validated theme
-extraction, evidence-quality grading, and bounded score adjustments.
+Status: Phase 4 complete — personalization and user memory on top of
+the Phase 3 decision engine: saved general and per-category preferences,
+personalized scoring with attribution, decision history, feedback, and
+user-approved suggestions.
 
 ## How it works
 
@@ -41,6 +42,13 @@ extraction, evidence-quality grading, and bounded score adjustments.
    sources, grades evidence quality, and shows bounded score adjustments
    (+5/−8 max) with rank-impact notes. Single-source findings stay
    preliminary; contradictions add uncertainty instead of points.
+8. Signed-in users can save general and per-category preferences (brands,
+   budgets, priorities) from Preferences; future recommendations apply
+   them with a full attribution report, and each search can opt out once
+   via "Use my saved preferences". Decisions can be saved, recommendations
+   rated, and inferred suggestions confirmed, edited, or dismissed from
+   the Suggestions inbox. All saved data is reviewable and clearable from
+   Preferences.
 
 ## Stack
 
@@ -98,6 +106,7 @@ If `npm` fails with EPERM on `~/.npm`, fix ownership once:
 | `WISORA_MUSE_EFFORT_REASON` | no | Effort for verdict rationale (default `medium`) |
 | `WISORA_MUSE_BIN` | no | `muse` binary path (default `muse` on `PATH`) |
 | `WISORA_MUSE_BASE_URL` | no | Only if your key targets a non-default endpoint |
+| `WISORA_DATA_DIR` | no | Directory for per-user preference files (default `./data`, gitignored) |
 
 All secrets stay server-side in `.env` (gitignored). They are never logged,
 never sent to the browser, and never printed by any script. Without keys the
@@ -121,11 +130,34 @@ Tata CLiQ, Nykaa Fashion.
   normalized products + per-source statuses + warnings
 - `POST /api/recommend` — full pipeline (or pass-through of `products` from
   `/api/search` to avoid re-searching; accepts `requirements`, `weights`,
-  `allowOverBudget`) → ranked products with score breakdowns and evidence,
-  excluded options, confidence assessment, and validated verdict
+  `allowOverBudget`, `personalize`) → ranked products with score breakdowns
+  and evidence, excluded options, confidence assessment, validated verdict,
+  and a `personalization` report (which saved preferences applied, which
+  were skipped, and budget/weights provenance). Signed-in requests apply
+  the user's saved profile unless `personalize: false` opts out for one
+  query; current instructions always win over stored preferences.
 - `POST /api/reviews` — `{ products (1–3), category?, requirements?,
   rankedTotals? }` → per-product review records, validated insights,
   contradictions, evidence quality, and bounded score adjustments
+- `GET / PUT /api/profile` — signed-in user's preference profile
+  (`{ profile }`, null before anything is saved); `DELETE` clears it
+- `GET / PUT /api/profile/[category]` — per-category preferences
+  (`{ category, preferences }`); PUT merges, explicit null removes a field
+- `GET / POST /api/memory/decisions` — saved recommendation snapshots
+  (`?limit=`, newest-first)
+- `GET / POST /api/memory/saved/products` (+ `DELETE ?productId=`) —
+  saved product keepsakes (re-saving upserts)
+- `GET / POST /api/memory/saved/comparisons` (+ `DELETE ?id=`) — saved
+  2–6 product comparison sets
+- `GET / POST /api/memory/feedback` — recommendation feedback: helpful,
+  preferred/rejected/purchased products, reasons, notes
+- `GET /api/memory/proposals` — pending inferred-preference proposals
+  (reading also runs detection; nothing is inferred silently)
+- `POST /api/memory/proposals/decide` — `{ id, decision:
+  confirmed|rejected, patch? }`; confirmations apply to the profile with
+  `confirmed` provenance
+- `DELETE /api/memory/history` — clear decisions, feedback, and
+  proposals (saved items and the profile are kept)
 
 ## Limitations (Phase 1)
 

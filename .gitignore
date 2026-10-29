@@ -3,9 +3,9 @@ node_modules/
 out/
 build/
 coverage/
-.agents/
 .git/
 .env
+data/
 *.log
 *.tsbuildinfo
 .DS_Store

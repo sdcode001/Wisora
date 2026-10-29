@@ -9,6 +9,8 @@ import {
 import { resolveIntent } from "../../../lib/intent/service";
 import { IntentSchema } from "../../../lib/intent/types";
 import { getReasonProvider } from "../../../lib/llm/provider";
+import { resolvePersonalization } from "../../../lib/memory/personalize";
+import { PROFILE_KEY_PREFIX } from "../../../lib/memory/profile";
 import { dedupeProducts } from "../../../lib/products/dedup";
 import { ProductSchema, type Product } from "../../../lib/products/schema";
 import { extractRequirements } from "../../../lib/requirements/extract";
@@ -44,6 +46,7 @@ const BodySchema = z.object({
   products: z.array(ProductSchema).optional(),
   statuses: z.array(StatusSchema).optional(),
   searchedAt: z.string().optional(),
+  personalize: z.boolean().optional(),
 });
 
 export async function POST(request: Request): Promise<NextResponse> {
@@ -61,20 +64,39 @@ export async function POST(request: Request): Promise<NextResponse> {
   const resolved = input.intent
     ? { intent: input.intent, llmUsed: false, llmAvailable: true }
     : await resolveIntent(input.query);
-  const intent = resolved.intent;
-  const category = input.category ?? intent.category;
+  const detectedIntent = resolved.intent;
+  const category = input.category ?? detectedIntent.category;
   const categorySource = input.category ? "user" : "detected";
 
-  const requirements =
+  const baseRequirements =
     input.requirements ??
-    (await extractRequirements(intent.query, intent)).requirements;
+    (await extractRequirements(detectedIntent.query, detectedIntent))
+      .requirements;
+
+  const personalization = await resolvePersonalization(request, {
+    intent: detectedIntent,
+    requirements: baseRequirements,
+    category,
+    weightsProvided: input.weights !== undefined,
+    personalize: input.personalize ?? true,
+  });
+  if (personalization.warning) {
+    warnings.push(personalization.warning);
+  }
+  const intent = personalization.intent;
+  const requirements = personalization.requirements;
 
   const weightsParsed = ScoreWeightsSchema.safeParse(
-    input.weights ?? DEFAULT_WEIGHTS,
+    input.weights ?? personalization.preset ?? DEFAULT_WEIGHTS,
   );
   const weights = weightsParsed.success ? weightsParsed.data : DEFAULT_WEIGHTS;
   if (!weightsParsed.success) {
     warnings.push("Invalid scoring weights ignored; using defaults.");
+  }
+  if (input.weights !== undefined) {
+    personalization.report.weightsSource = weightsParsed.success
+      ? "request"
+      : "default";
   }
 
   let products: Product[];
@@ -192,7 +214,10 @@ export async function POST(request: Request): Promise<NextResponse> {
         budgetMax: intent.budgetInr?.max,
         constraints: [
           ...requirements.must.map((m) => `Must: ${m.label}`),
-          ...requirements.exclude.map((e) => `Exclude: ${e.label}`),
+          ...requirements.exclude.map(
+            (e) =>
+              `Exclude: ${e.label}${e.key.startsWith(PROFILE_KEY_PREFIX) ? " (saved preference)" : ""}`,
+          ),
         ],
         candidates: ranked.slice(0, 6).map((entry) => ({
           id: entry.product.id,
@@ -240,6 +265,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     intent: effectiveIntent,
     categorySource,
     llmUsed: resolved.llmUsed,
+    personalization: personalization.report,
     requirements,
     ranked: ranked.map((entry) => ({
       ...entry,
