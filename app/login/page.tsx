@@ -88,7 +88,7 @@ export default function Login() {
     let cancelled = false;
     async function setup(): Promise<void> {
       try {
-        const me = await fetch("/api/auth/me");
+        const me = await fetch("/api/auth/me", { cache: "no-store" });
         if (cancelled) {
           return;
         }

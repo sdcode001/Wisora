@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test } from "vitest";
 import {
   createSession,
   SESSION_COOKIE,
@@ -16,6 +16,13 @@ import { POST } from "./route";
 
 delete process.env.META_API_KEY;
 delete process.env.TAVILY_API_KEY;
+
+// Price auto-recording writes to the data dir — keep every test isolated.
+beforeEach(async () => {
+  process.env.WISORA_DATA_DIR = await mkdtemp(
+    path.join(tmpdir(), "wisora-recommend-"),
+  );
+});
 
 const req = (body: unknown): Request =>
   new Request("http://localhost/api/recommend", {
@@ -488,4 +495,43 @@ test("an unreadable profile degrades gracefully with a warning", async () => {
     body.warnings.some((warning) => warning.includes("couldn't be read")),
   ).toBe(true);
   expect(body.ranked).toHaveLength(1);
+});
+
+// --- Price auto-recording (Phase 5) ---
+
+test("recommendations record prices and evaluate watches", async () => {
+  process.env.SESSION_SECRET = "test-secret";
+  process.env.WISORA_DATA_DIR = await mkdtemp(
+    path.join(tmpdir(), "wisora-recommend-"),
+  );
+  const store = new FileMemoryStore();
+  await store.saveWatch("user-1", {
+    productId: "p1",
+    url: PRODUCT.url,
+    title: PRODUCT.title,
+    merchant: PRODUCT.merchant,
+    targetPrice: 46000,
+    currency: "INR",
+    active: true,
+    canWait: true,
+  });
+  const response = await POST(
+    authedReq({
+      query: "laptop under 50000",
+      intent: INTENT,
+      requirements: REQUIREMENTS,
+      products: [PRODUCT],
+      statuses: [STATUS],
+      searchedAt: FRESH,
+    }),
+  );
+  expect(response.status).toBe(200);
+  expect(await store.listObservations("p1")).toHaveLength(1);
+  const alerts = await store.listAlerts("user-1");
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]?.observedPrice).toBe(45000);
+  const body = (await response.json()) as { warnings: string[] };
+  expect(body.warnings.some((warning) => warning.includes("price alert"))).toBe(
+    true,
+  );
 });

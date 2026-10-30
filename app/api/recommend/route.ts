@@ -9,8 +9,15 @@ import {
 import { resolveIntent } from "../../../lib/intent/service";
 import { IntentSchema } from "../../../lib/intent/types";
 import { getReasonProvider } from "../../../lib/llm/provider";
+import { sessionUserFromRequest } from "../../../lib/auth/require-session";
+import { FileMemoryStore } from "../../../lib/memory/file-store";
 import { resolvePersonalization } from "../../../lib/memory/personalize";
 import { PROFILE_KEY_PREFIX } from "../../../lib/memory/profile";
+import {
+  evaluateObservationsForUser,
+  recordProductPrices,
+} from "../../../lib/prices/check";
+import { notifierFromEnv } from "../../../lib/prices/notify";
 import { dedupeProducts } from "../../../lib/products/dedup";
 import { ProductSchema, type Product } from "../../../lib/products/schema";
 import { extractRequirements } from "../../../lib/requirements/extract";
@@ -260,6 +267,33 @@ export async function POST(request: Request): Promise<NextResponse> {
     ranked.length >= 2 && ranked[0] && ranked[1]
       ? describeRankingGap(ranked[0], ranked[1])
       : [];
+
+  // Price history builds from normal use: persist fresh prices, then check
+  // the signed-in user's watches against them. Neither step may fail this.
+  try {
+    const store = new FileMemoryStore();
+    const observations = await recordProductPrices(
+      store,
+      ranked.map((entry) => entry.product),
+      "search",
+    );
+    const user = sessionUserFromRequest(request);
+    if (user && observations.length > 0) {
+      const alerts = await evaluateObservationsForUser({
+        store,
+        userSub: user.sub,
+        observations,
+        notifier: notifierFromEnv(),
+      });
+      if (alerts.length > 0) {
+        warnings.push(
+          `${alerts.length} price alert${alerts.length === 1 ? " was" : "s were"} triggered — see Watchlist.`,
+        );
+      }
+    }
+  } catch {
+    warnings.push("Price history was unavailable for this search.");
+  }
 
   return NextResponse.json({
     intent: effectiveIntent,

@@ -28,6 +28,76 @@ export interface LlmVerdictInput {
 
 const OVER_BUDGET_AVOID_RATIO = 1.25;
 
+const FILLER_WORDS = new Set([
+  "with",
+  "from",
+  "and",
+  "for",
+  "the",
+  "this",
+  "that",
+  "pack",
+  "combo",
+]);
+
+function distinctiveTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9\u0900-\u097F]+/)
+    .filter(
+      (token) =>
+        (token.length >= 4 || (token.length >= 3 && /\d/.test(token))) &&
+        !FILLER_WORDS.has(token),
+    );
+}
+
+function countNameMatches(reason: string, title: string, merchant: string): number {
+  const haystack = reason.toLowerCase();
+  let matches = 0;
+  for (const token of [
+    ...distinctiveTokens(title),
+    ...distinctiveTokens(merchant),
+  ]) {
+    if (haystack.includes(token)) {
+      matches += 1;
+    }
+  }
+  return matches;
+}
+
+/**
+ * The product the reason text best describes. Re-points only on unique,
+ * strictly-best evidence of a different product — ties and nameless
+ * reasons keep the claimed id, so generic LLM prose never breaks.
+ */
+export function resolveDescribedProduct(
+  reason: string,
+  ranked: RankedProduct[],
+  claimedId: string,
+): string {
+  let bestId = claimedId;
+  let bestMatches = -1;
+  let tied = false;
+  for (const entry of ranked) {
+    const matches = countNameMatches(
+      reason,
+      entry.product.title,
+      entry.product.merchant,
+    );
+    if (matches > bestMatches) {
+      bestMatches = matches;
+      bestId = entry.product.id;
+      tied = false;
+    } else if (matches === bestMatches) {
+      tied = true;
+    }
+  }
+  if (tied || bestMatches <= 0) {
+    return claimedId;
+  }
+  return bestId;
+}
+
 function needsMore(
   verdict: "INSUFFICIENT_EVIDENCE" | "NEEDS_CLARIFICATION",
   reason: string,
@@ -114,7 +184,7 @@ export function validateLlmVerdict(
   ranked: RankedProduct[],
   intent: Intent,
 ): Recommendation {
-  const target =
+  let target =
     input.productId != null
       ? ranked.find((entry) => entry.product.id === input.productId)
       : undefined;
@@ -126,6 +196,19 @@ export function validateLlmVerdict(
       ["Re-run the search to get a fresh recommendation."],
       "rules",
     );
+  }
+
+  // The link must follow the description: when the reason text clearly
+  // names a different verified option than the claimed id, re-point to
+  // the described one before any price or budget check runs.
+  if (target) {
+    const resolvedId = resolveDescribedProduct(
+      input.reason,
+      ranked,
+      target.product.id,
+    );
+    target =
+      ranked.find((entry) => entry.product.id === resolvedId) ?? target;
   }
 
   const max = intent.budgetInr?.max;

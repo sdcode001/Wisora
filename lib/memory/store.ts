@@ -1,3 +1,12 @@
+import type {
+  NewPriceAlert,
+  NewWatch,
+  PriceAlert,
+  PriceObservation,
+  Watch,
+  WatchCheck,
+  WatchUpdate,
+} from "../prices/observation";
 import type { UserProfile } from "./profile";
 import type {
   DecisionRecord,
@@ -62,4 +71,40 @@ export interface MemoryStore {
     feedback: number;
     proposals: number;
   }>;
+
+  /**
+   * Global price observations (not per-user: prices are facts, and watches
+   * are evaluated against them). Same-price observations within the dedup
+   * window are skipped — `recorded` tells which happened.
+   */
+  recordObservation(
+    input: PriceObservation,
+  ): Promise<{ recorded: boolean; observation: PriceObservation }>;
+  listObservations(
+    productId: string,
+    limit?: number,
+  ): Promise<PriceObservation[]>;
+
+  listWatches(userSub: string): Promise<Watch[]>;
+  getWatch(userSub: string, id: string): Promise<Watch | null>;
+  saveWatch(userSub: string, input: NewWatch): Promise<Watch>;
+  updateWatch(userSub: string, update: WatchUpdate): Promise<Watch | null>;
+  deleteWatch(userSub: string, id: string): Promise<boolean>;
+  updateWatchCheck(
+    userSub: string,
+    id: string,
+    check: WatchCheck,
+  ): Promise<Watch | null>;
+
+  listAlerts(userSub: string, limit?: number): Promise<PriceAlert[]>;
+  saveAlert(userSub: string, input: NewPriceAlert): Promise<PriceAlert>;
+  markAlertsRead(userSub: string, ids: string[] | "all"): Promise<number>;
+  updateAlertEmail(
+    userSub: string,
+    alertId: string,
+    email: { attempted: boolean; sent: boolean; error?: string },
+  ): Promise<void>;
+
+  /** Owner subs for dirs holding watches (monitor cycle only). */
+  listWatchOwners(): Promise<string[]>;
 }

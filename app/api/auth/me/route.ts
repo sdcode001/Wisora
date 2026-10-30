@@ -9,8 +9,13 @@ import { SESSION_COOKIE, verifySession } from "../../../../lib/auth/session";
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const secret = process.env.SESSION_SECRET;
   const token = request.cookies.get(SESSION_COOKIE)?.value;
+  // Never cache: a stale "signed in" answer bounces logout back to "/".
+  const headers = { "Cache-Control": "no-store" };
   if (!secret || !token) {
-    return NextResponse.json({ user: null });
+    return NextResponse.json({ user: null }, { headers });
   }
-  return NextResponse.json({ user: verifySession(token, secret) });
+  return NextResponse.json(
+    { user: verifySession(token, secret) },
+    { headers },
+  );
 }

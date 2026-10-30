@@ -206,6 +206,118 @@ describe("validateLlmVerdict", () => {
     expect(rec.source).toBe("llm");
   });
 
+  it("re-points the link to the product the reason describes", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        productId: "p2",
+        reason:
+          "Test Laptop 16GB at ₹45,000 fits the budget with strong ratings.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      [
+        ranked(product({ id: "p1" }), 95),
+        ranked(
+          product({
+            id: "p2",
+            title: "Slim Notebook 8GB",
+            url: "https://www.amazon.in/dp/B0TEST2",
+            priceInr: 38000,
+          }),
+          90,
+        ),
+      ],
+      intent(),
+    );
+    expect(rec.verdict).toBe("BUY");
+    expect(rec.source).toBe("llm");
+    expect(rec.productId).toBe("p1");
+    expect(rec.reason).toContain("Test Laptop 16GB");
+  });
+
+  it("vetoes a re-pointed pick that is far over budget", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        productId: "p2",
+        reason: "Test Laptop 16GB leads on relevance.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      [
+        ranked(product({ id: "p1", priceInr: 80000 }), 95),
+        ranked(
+          product({
+            id: "p2",
+            title: "Slim Notebook 8GB",
+            url: "https://www.amazon.in/dp/B0TEST2",
+            priceInr: 38000,
+          }),
+          90,
+        ),
+      ],
+      intent(),
+    );
+    expect(rec.verdict).toBe("AVOID");
+    expect(rec.productId).toBe("p1");
+    expect(rec.reason).toContain("Vetoed");
+  });
+
+  it("keeps the claimed link when the reason names no product", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        productId: "p2",
+        reason: "Great deal overall.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      [
+        ranked(product({ id: "p1" }), 95),
+        ranked(
+          product({
+            id: "p2",
+            title: "Slim Notebook 8GB",
+            url: "https://www.amazon.in/dp/B0TEST2",
+            priceInr: 38000,
+          }),
+          90,
+        ),
+      ],
+      intent(),
+    );
+    expect(rec.verdict).toBe("BUY");
+    expect(rec.productId).toBe("p2");
+  });
+
+  it("keeps the claimed link when the reason names several products", () => {
+    const rec = validateLlmVerdict(
+      {
+        verdict: "BUY",
+        productId: "p2",
+        reason: "Test Laptop 16GB beats Slim Notebook 8GB on memory.",
+        tradeoffs: [],
+        uncertainties: [],
+      },
+      [
+        ranked(product({ id: "p1" }), 95),
+        ranked(
+          product({
+            id: "p2",
+            title: "Slim Notebook 8GB",
+            url: "https://www.amazon.in/dp/B0TEST2",
+            priceInr: 38000,
+          }),
+          90,
+        ),
+      ],
+      intent(),
+    );
+    expect(rec.verdict).toBe("BUY");
+    expect(rec.productId).toBe("p2");
+  });
+
   it("passes WAIT through with a thin-price note when priceless", () => {
     const rec = validateLlmVerdict(
       {

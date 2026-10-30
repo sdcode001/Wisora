@@ -52,3 +52,13 @@ test("returns a null user for tampered sessions", async () => {
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ user: null });
 });
+
+test("session answers are never cached", async () => {
+  process.env.SESSION_SECRET = "test-secret";
+  const anon = await GET(reqWithCookie(null));
+  expect(anon.headers.get("Cache-Control")).toContain("no-store");
+  const authed = await GET(
+    reqWithCookie(createSession(USER, "test-secret")),
+  );
+  expect(authed.headers.get("Cache-Control")).toContain("no-store");
+});

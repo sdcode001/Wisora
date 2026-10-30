@@ -137,6 +137,7 @@ function buildVerdictPrompt(request: ExplainVerdictRequest): string {
     "  Never invent sales, price drops, launches, or reviews.",
     "- AVOID for a poor match; explain which requirement it fails.",
     "- reason: 1-3 sentences. tradeoffs: honest trade-offs. uncertainties: what could change the verdict.",
+    "- reason MUST describe the option with the returned productId — name that option exactly as listed.",
     "- Use only the options below. Never invent products, prices, or facts.",
     `Budget max (INR): ${request.budgetMax ?? "none stated"}`,
     `Hard constraints: ${request.constraints.length > 0 ? request.constraints.join("; ") : "none"}`,

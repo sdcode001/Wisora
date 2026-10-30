@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 import { createDefaultProfile } from "./profile";
-import { FileMemoryStore, StoredDataError } from "./file-store";
+import {
+  DuplicateWatchError,
+  FileMemoryStore,
+  StoredDataError,
+} from "./file-store";
 
 async function freshStore(): Promise<{ store: FileMemoryStore; dir: string }> {
   const dir = await mkdtemp(path.join(tmpdir(), "wisora-memory-"));
@@ -219,6 +223,146 @@ test("corrupt record files quarantine to empty lists", async () => {
   expect(
     entries.some((name) => name.startsWith("decisions.json.corrupt-")),
   ).toBe(true);
+});
+
+test("observations dedup same-price repeats but keep changes", async () => {
+  const { store } = await freshStore();
+  const base = {
+    productId: "abc123",
+    url: "https://www.amazon.in/dp/B0TEST1",
+    title: "Test Laptop",
+    merchant: "Amazon India",
+    sourceId: "amazon-in",
+    currency: "INR",
+    evidence: "repeated",
+    candidates: 2,
+    source: "search",
+  } as const;
+  const first = await store.recordObservation({
+    ...base,
+    priceInr: 45000,
+    observedAt: "2026-02-01T00:00:00.000Z",
+  });
+  expect(first.recorded).toBe(true);
+  const dup = await store.recordObservation({
+    ...base,
+    priceInr: 45000,
+    observedAt: "2026-02-01T02:00:00.000Z",
+  });
+  expect(dup.recorded).toBe(false);
+  expect(dup.observation.priceInr).toBe(45000);
+  const changed = await store.recordObservation({
+    ...base,
+    priceInr: 43000,
+    observedAt: "2026-02-01T03:00:00.000Z",
+  });
+  expect(changed.recorded).toBe(true);
+  expect(await store.listObservations("abc123")).toHaveLength(2);
+  expect(await store.listObservations("other")).toEqual([]);
+});
+
+test("observations reject unsafe product ids", async () => {
+  const { store } = await freshStore();
+  await expect(store.listObservations("../evil")).rejects.toBeInstanceOf(
+    StoredDataError,
+  );
+});
+
+function newWatch(targetPrice: number, productId = "abc123") {
+  return {
+    productId,
+    url: "https://www.amazon.in/dp/B0TEST1",
+    title: "Test Laptop",
+    merchant: "Amazon India",
+    targetPrice,
+    currency: "INR",
+    active: true,
+    canWait: true,
+  } as const;
+}
+
+test("watches save, update, and delete", async () => {
+  const { store } = await freshStore();
+  const watch = await store.saveWatch("user-1", newWatch(40000));
+  expect(watch.id).toMatch(/^[0-9a-f]{24}$/);
+  expect(await store.getWatch("user-1", watch.id)).not.toBeNull();
+  expect(await store.getWatch("user-1", "missing")).toBeNull();
+  const updated = await store.updateWatch("user-1", {
+    id: watch.id,
+    active: false,
+  });
+  expect(updated?.active).toBe(false);
+  expect(await store.updateWatch("user-1", { id: "missing" })).toBeNull();
+  expect(await store.deleteWatch("user-1", "missing")).toBe(false);
+  expect(await store.deleteWatch("user-1", watch.id)).toBe(true);
+});
+
+test("duplicate active watches at the same target are refused", async () => {
+  const { store } = await freshStore();
+  await store.saveWatch("user-1", newWatch(40000));
+  await expect(
+    store.saveWatch("user-1", newWatch(40000)),
+  ).rejects.toBeInstanceOf(DuplicateWatchError);
+  // A different target on the same product is a different question.
+  await store.saveWatch("user-1", newWatch(35000));
+  expect(await store.listWatches("user-1")).toHaveLength(2);
+});
+
+test("retargeting a watch resets its alert state", async () => {
+  const { store } = await freshStore();
+  const watch = await store.saveWatch("user-1", newWatch(40000));
+  await store.saveAlert("user-1", {
+    watchId: watch.id,
+    productId: watch.productId,
+    title: watch.title,
+    merchant: watch.merchant,
+    url: watch.url,
+    observedPrice: 39000,
+    targetPrice: 40000,
+    observedAt: "2026-02-01T00:00:00.000Z",
+  });
+  expect((await store.getWatch("user-1", watch.id))?.lastAlertedPrice).toBe(
+    39000,
+  );
+  const retargeted = await store.updateWatch("user-1", {
+    id: watch.id,
+    targetPrice: 35000,
+  });
+  expect(retargeted?.lastAlertAt).toBeUndefined();
+  expect(retargeted?.lastAlertedPrice).toBeUndefined();
+});
+
+test("alerts list, mark read, and track email outcome", async () => {
+  const { store } = await freshStore();
+  const watch = await store.saveWatch("user-1", newWatch(40000));
+  const alert = await store.saveAlert("user-1", {
+    watchId: watch.id,
+    productId: watch.productId,
+    title: watch.title,
+    merchant: watch.merchant,
+    url: watch.url,
+    observedPrice: 39000,
+    targetPrice: 40000,
+    observedAt: "2026-02-01T00:00:00.000Z",
+  });
+  expect(alert.read).toBe(false);
+  await store.updateAlertEmail("user-1", alert.id, {
+    attempted: true,
+    sent: true,
+  });
+  expect((await store.listAlerts("user-1"))[0]?.email).toEqual({
+    attempted: true,
+    sent: true,
+  });
+  expect(await store.markAlertsRead("user-1", [alert.id])).toBe(1);
+  expect(await store.markAlertsRead("user-1", "all")).toBe(0);
+});
+
+test("listWatchOwners finds only dirs holding watches", async () => {
+  const { store } = await freshStore();
+  await store.saveProfile(createDefaultProfile("lonely"));
+  await store.saveWatch("user-1", newWatch(40000));
+  expect(await store.listWatchOwners()).toEqual(["user-1"]);
 });
 
 test("refuses version drift without quarantining", async () => {

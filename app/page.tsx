@@ -13,6 +13,13 @@ import { useRouter } from "next/navigation";
 import { SOURCES, type Category } from "../config/sources";
 import type { Intent } from "../lib/intent/types";
 import { normalizeWeights } from "../lib/recommend/weights";
+import {
+  LEGACY_WORKFLOW_KEY,
+  clearStoredWorkflow,
+  loadStoredWorkflow,
+  saveStoredWorkflow,
+  workflowStorageKey,
+} from "../lib/workflow/persist";
 
 const CATEGORIES: Array<{ id: Category; label: string }> = [
   { id: "electronics", label: "Electronics" },
@@ -308,6 +315,90 @@ interface MemorySummary {
   proposalsPending: number;
 }
 
+interface WatchData {
+  id: string;
+  productId: string;
+  url: string;
+  title: string;
+  merchant: string;
+  targetPrice: number;
+  active: boolean;
+  canWait: boolean;
+  lastCheck?: {
+    at: string;
+    priceInr?: number;
+    status: "ok" | "no-price" | "unavailable" | "fetch-failed";
+    error?: string;
+  };
+  lastAlertAt?: string;
+  lastAlertedPrice?: number;
+}
+
+interface PriceObservationData {
+  productId: string;
+  priceInr: number;
+  observedAt: string;
+  evidence: "repeated" | "single";
+  source: "search" | "watch-check";
+}
+
+interface PriceStatsData {
+  count: number;
+  windowDays: number;
+  latest: PriceObservationData | null;
+  stale: boolean;
+  min: { priceInr: number; observedAt: string } | null;
+  max: { priceInr: number; observedAt: string } | null;
+  averageInr: number | null;
+  changeVsPrevious: { absoluteInr: number; percent: number } | null;
+}
+
+interface EnrichedWatch {
+  watch: WatchData;
+  latest: PriceObservationData | null;
+  stats: PriceStatsData;
+  recent: PriceObservationData[];
+  unreadAlerts: number;
+}
+
+interface CardInsight {
+  latest: PriceObservationData | null;
+  stats: PriceStatsData;
+  recent: PriceObservationData[];
+}
+
+interface AlertData {
+  id: string;
+  watchId: string;
+  title: string;
+  merchant: string;
+  url: string;
+  observedPrice: number;
+  targetPrice: number;
+  observedAt: string;
+  read: boolean;
+  email?: { attempted: boolean; sent: boolean; error?: string };
+}
+
+interface MonitorData {
+  active: boolean;
+  intervalMinutes: number;
+  maxChecksPerCycle: number;
+  tavilyConfigured: boolean;
+  emailConfigured: boolean;
+}
+
+interface TrackDraft {
+  productId: string;
+  url: string;
+  title: string;
+  merchant: string;
+  sourceId: string;
+  currentPrice: number | null;
+  target: string;
+  canWait: boolean;
+}
+
 function formatInr(value: number): string {
   return `₹${value.toLocaleString("en-IN")}`;
 }
@@ -397,8 +488,6 @@ function scrollToElement(element: HTMLElement | null): void {
   });
 }
 
-const WORKFLOW_STORAGE_KEY = "wisora:workflow:v1";
-
 interface PersistedWorkflow {
   version: 1;
   query: string;
@@ -418,33 +507,6 @@ interface PersistedWorkflow {
   searchError: string | null;
   verdictError: string | null;
   reqsError: string | null;
-}
-
-function loadPersistedWorkflow(): PersistedWorkflow | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  try {
-    const raw = window.localStorage.getItem(WORKFLOW_STORAGE_KEY);
-    if (!raw) {
-      return null;
-    }
-    const parsed = JSON.parse(raw) as Partial<PersistedWorkflow>;
-    if (parsed?.version !== 1) {
-      return null;
-    }
-    return parsed as PersistedWorkflow;
-  } catch {
-    return null;
-  }
-}
-
-function savePersistedWorkflow(state: PersistedWorkflow): void {
-  try {
-    window.localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // Storage full or unavailable — the app works without persistence.
-  }
 }
 
 function Stars({ value }: { value: number }) {
@@ -856,6 +918,7 @@ export default function Home() {
   const intentRef = useRef<HTMLElement | null>(null);
   const stagesRef = useRef<HTMLOListElement | null>(null);
   const verdictRef = useRef<HTMLElement | null>(null);
+  const restoredSubRef = useRef<string | null>(null);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [proposalsOpen, setProposalsOpen] = useState(false);
   const [profile, setProfile] = useState<ProfileData | null>(null);
@@ -893,6 +956,20 @@ export default function Home() {
   const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [feedbackDone, setFeedbackDone] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [watchesOpen, setWatchesOpen] = useState(false);
+  const [enrichedWatches, setEnrichedWatches] = useState<EnrichedWatch[]>([]);
+  const [watchesLoading, setWatchesLoading] = useState(false);
+  const [watchesError, setWatchesError] = useState<string | null>(null);
+  const [watchesNotice, setWatchesNotice] = useState<string | null>(null);
+  const [alerts, setAlerts] = useState<AlertData[]>([]);
+  const [unreadAlerts, setUnreadAlerts] = useState(0);
+  const [monitor, setMonitor] = useState<MonitorData | null>(null);
+  const [trackDraft, setTrackDraft] = useState<TrackDraft | null>(null);
+  const [creatingWatch, setCreatingWatch] = useState(false);
+  const [checkingId, setCheckingId] = useState<string | null>(null);
+  const [editingWatchId, setEditingWatchId] = useState<string | null>(null);
+  const [editTarget, setEditTarget] = useState("");
+  const [insights, setInsights] = useState<Record<string, CardInsight>>({});
 
   useEffect(() => {
     return () => {
@@ -907,7 +984,9 @@ export default function Home() {
     let cancelled = false;
     void (async () => {
       try {
-        const response = await fetch("/api/auth/me");
+        const response = await fetch("/api/auth/me", {
+          cache: "no-store",
+        });
         if (cancelled) {
           return;
         }
@@ -952,13 +1031,47 @@ export default function Home() {
   }, [verdict]);
 
   useEffect(() => {
-    if (!prefsOpen && !proposalsOpen) {
+    if (!verdict || !user) {
+      return;
+    }
+    const ids = verdict.ranked
+      .slice(0, 10)
+      .map((item) => item.product.id)
+      .filter((id) => /^[A-Za-z0-9_-]{1,64}$/.test(id));
+    if (ids.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/prices/insights?ids=${ids.map((id) => encodeURIComponent(id)).join(",")}`,
+        );
+        if (!response.ok || cancelled) {
+          return;
+        }
+        const data = (await response.json()) as {
+          insights: Record<string, CardInsight>;
+        };
+        setInsights(data.insights ?? {});
+      } catch {
+        // Cards simply show no history line.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [verdict, user]);
+
+  useEffect(() => {
+    if (!prefsOpen && !proposalsOpen && !watchesOpen) {
       return;
     }
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setPrefsOpen(false);
         setProposalsOpen(false);
+        setWatchesOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -968,22 +1081,109 @@ export default function Home() {
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = previousOverflow;
     };
-  }, [prefsOpen, proposalsOpen]);
+  }, [prefsOpen, proposalsOpen, watchesOpen]);
 
   /* eslint-disable react-hooks/exhaustive-deps -- one-shot bootstrap when the
      signed-in user resolves; re-running on every render is not intended. */
   useEffect(() => {
     if (user) {
       void loadSummary();
+      void loadAlerts();
     }
   }, [user]);
   /* eslint-enable react-hooks/exhaustive-deps */
+
+  function resetWorkflowState(): void {
+    // Persisted workflow fields back to their initial values…
+    setQuery("");
+    setResult(null);
+    setOverride(null);
+    setDisabled({});
+    setReqs(null);
+    setAnswers({});
+    setReqsError(null);
+    setWeights({ ...DEFAULT_WEIGHT_STATE });
+    setAllowOverBudget(false);
+    setSearch(null);
+    setVerdict(null);
+    setReviews(null);
+    setReviewsError(null);
+    setCompareIds([]);
+    setShowCompare(false);
+    setError(null);
+    setSearchError(null);
+    setVerdictError(null);
+    setStage("idle");
+    // …plus every per-user cache, so a new account never flashes the
+    // previous account's data before its own loads.
+    setPrefsOpen(false);
+    setProposalsOpen(false);
+    setWatchesOpen(false);
+    setProfile(null);
+    setHasProfile(false);
+    setProfileError(null);
+    setProfileNotice(null);
+    setGeneralDraft(emptyGeneralDraft());
+    setCatTab("electronics");
+    setCatDraft(emptyCategoryDraft());
+    setCatNotice(null);
+    setCatError(null);
+    setProposals([]);
+    setProposalCount(0);
+    setProposalsError(null);
+    setProposalsNotice(null);
+    setDecidingId(null);
+    setEditingId(null);
+    setEditValue("");
+    setSummary(null);
+    setSummaryError(null);
+    setUseProfile(true);
+    setSaveState("idle");
+    setSavedDecisionId(null);
+    setHelpfulVote(null);
+    setFeedbackOpen(false);
+    setPreferId("");
+    setRejectId("");
+    setRejectReason("");
+    setPurchasedId("");
+    setFeedbackDone(false);
+    setFeedbackError(null);
+    setEnrichedWatches([]);
+    setWatchesError(null);
+    setWatchesNotice(null);
+    setAlerts([]);
+    setUnreadAlerts(0);
+    setMonitor(null);
+    setTrackDraft(null);
+    setCreatingWatch(false);
+    setCheckingId(null);
+    setEditingWatchId(null);
+    setEditTarget("");
+    setInsights({});
+  }
 
   /* eslint-disable react-hooks/set-state-in-effect -- client-only restore
      from localStorage must run in an effect; reading it during render
      would mismatch the server HTML on hydration. */
   useEffect(() => {
-    const saved = loadPersistedWorkflow();
+    const sub = user?.sub ?? null;
+    if (sub === restoredSubRef.current) {
+      return;
+    }
+    restoredSubRef.current = sub;
+    resetWorkflowState();
+    if (sub === null) {
+      // Logged out (or auth unresolved): show nothing and persist nothing.
+      setRestored(false);
+      return;
+    }
+    // One-time cleanup of the pre-fix global key, then restore this
+    // account's own draft — never another account's.
+    clearStoredWorkflow(window.localStorage, LEGACY_WORKFLOW_KEY);
+    const saved = loadStoredWorkflow<PersistedWorkflow>(
+      window.localStorage,
+      workflowStorageKey(sub),
+    );
     if (saved) {
       setQuery(saved.query ?? "");
       setResult(saved.result);
@@ -1007,35 +1207,40 @@ export default function Home() {
       setStage(saved.verdict ? "done" : "idle");
     }
     setRestored(true);
-  }, []);
+  }, [user]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
-    if (!restored) {
+    if (!restored || !user) {
       return;
     }
-    savePersistedWorkflow({
-      version: 1,
-      query,
-      result,
-      override,
-      disabled,
-      reqs,
-      answers,
-      weights,
-      allowOverBudget,
-      search,
-      verdict,
-      reviews,
-      compareIds,
-      showCompare,
-      error,
-      searchError,
-      verdictError,
-      reqsError,
-    });
+    saveStoredWorkflow<PersistedWorkflow>(
+      window.localStorage,
+      workflowStorageKey(user.sub),
+      {
+        version: 1,
+        query,
+        result,
+        override,
+        disabled,
+        reqs,
+        answers,
+        weights,
+        allowOverBudget,
+        search,
+        verdict,
+        reviews,
+        compareIds,
+        showCompare,
+        error,
+        searchError,
+        verdictError,
+        reqsError,
+      },
+    );
   }, [
     restored,
+    user,
     query,
     result,
     override,
@@ -1345,7 +1550,10 @@ export default function Home() {
       // Cookie may already be gone; still redirect to login.
     }
     setUser(null);
-    router.push("/login");
+    // Full reload, not client-side nav: guarantees the session cookie,
+    // component state, and any cached route data are all dropped together.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- deliberate full reload on logout
+    window.location.href = "/login";
   }
 
   async function loadSummary(): Promise<void> {
@@ -1410,6 +1618,7 @@ export default function Home() {
       return;
     }
     setProposalsOpen(false);
+    setWatchesOpen(false);
     setPrefsOpen(true);
     setProfileNotice(null);
     setCatNotice(null);
@@ -1423,6 +1632,7 @@ export default function Home() {
       return;
     }
     setPrefsOpen(false);
+    setWatchesOpen(false);
     setProposalsOpen(true);
     setProposalsNotice(null);
     setProposalsError(null);
@@ -1945,6 +2155,276 @@ export default function Home() {
     }
   }
 
+  function openWatches(): void {
+    if (watchesOpen) {
+      setWatchesOpen(false);
+      return;
+    }
+    setPrefsOpen(false);
+    setProposalsOpen(false);
+    setWatchesOpen(true);
+    setWatchesNotice(null);
+    setWatchesError(null);
+    void loadWatches();
+    void loadAlerts();
+    void loadMonitor();
+  }
+
+  async function loadWatches(): Promise<void> {
+    setWatchesLoading(true);
+    setWatchesError(null);
+    try {
+      const response = await fetch("/api/memory/watches");
+      const data = (await response.json()) as {
+        watches?: EnrichedWatch[];
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not load watchlist.");
+      }
+      setEnrichedWatches(data.watches ?? []);
+    } catch (e) {
+      setWatchesError(
+        e instanceof Error ? e.message : "Could not load watchlist.",
+      );
+    } finally {
+      setWatchesLoading(false);
+    }
+  }
+
+  async function loadAlerts(): Promise<void> {
+    try {
+      const response = await fetch("/api/memory/alerts?limit=20");
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as { alerts: AlertData[] };
+      setAlerts(data.alerts ?? []);
+      setUnreadAlerts((data.alerts ?? []).filter((a) => !a.read).length);
+    } catch {
+      // Badge quietly stays stale.
+    }
+  }
+
+  async function loadMonitor(): Promise<void> {
+    try {
+      const response = await fetch("/api/prices/monitor");
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as { monitoring: MonitorData };
+      setMonitor(data.monitoring);
+    } catch {
+      // Status stays unknown.
+    }
+  }
+
+  function startTrack(product: Product): void {
+    setPrefsOpen(false);
+    setProposalsOpen(false);
+    setWatchesOpen(true);
+    setWatchesNotice(null);
+    setWatchesError(null);
+    setTrackDraft({
+      productId: product.id,
+      url: product.url,
+      title: product.title,
+      merchant: product.merchant,
+      sourceId: product.sourceId,
+      currentPrice: product.priceInr ?? null,
+      target: "",
+      canWait: true,
+    });
+    void loadWatches();
+    void loadAlerts();
+    void loadMonitor();
+  }
+
+  async function createWatch(): Promise<void> {
+    if (!trackDraft || creatingWatch) {
+      return;
+    }
+    const target = Number(trackDraft.target.trim());
+    if (!Number.isFinite(target) || target <= 0) {
+      setWatchesError("Enter a target price above ₹0.");
+      return;
+    }
+    setCreatingWatch(true);
+    setWatchesError(null);
+    setWatchesNotice(null);
+    try {
+      const response = await fetch("/api/memory/watches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productId: trackDraft.productId,
+          url: trackDraft.url,
+          title: trackDraft.title,
+          merchant: trackDraft.merchant,
+          sourceId: trackDraft.sourceId,
+          targetPrice: target,
+          canWait: trackDraft.canWait,
+        }),
+      });
+      const data = (await response.json()) as {
+        error?: string;
+        alert?: unknown;
+        realismWarning?: string | null;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not track this product.");
+      }
+      setTrackDraft(null);
+      setWatchesNotice(
+        data.realismWarning ??
+          (data.alert
+            ? "Target already met — alert created."
+            : "Watching this product."),
+      );
+      await loadWatches();
+      await loadAlerts();
+    } catch (e) {
+      setWatchesError(
+        e instanceof Error ? e.message : "Could not track this product.",
+      );
+    } finally {
+      setCreatingWatch(false);
+    }
+  }
+
+  async function saveWatchTarget(id: string): Promise<void> {
+    const target = Number(editTarget.trim());
+    if (!Number.isFinite(target) || target <= 0) {
+      setWatchesError("Enter a target price above ₹0.");
+      return;
+    }
+    setWatchesError(null);
+    try {
+      const response = await fetch("/api/memory/watches", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, targetPrice: target }),
+      });
+      if (!response.ok) {
+        const data = (await response.json()) as { error?: string };
+        throw new Error(data.error ?? "Could not update target.");
+      }
+      setEditingWatchId(null);
+      setWatchesNotice("Target updated.");
+      await loadWatches();
+    } catch (e) {
+      setWatchesError(
+        e instanceof Error ? e.message : "Could not update target.",
+      );
+    }
+  }
+
+  async function toggleWatchActive(entry: EnrichedWatch): Promise<void> {
+    setWatchesError(null);
+    try {
+      const response = await fetch("/api/memory/watches", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: entry.watch.id,
+          active: !entry.watch.active,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Could not update this watch.");
+      }
+      setWatchesNotice(
+        entry.watch.active ? "Watch paused." : "Watch resumed.",
+      );
+      await loadWatches();
+    } catch (e) {
+      setWatchesError(
+        e instanceof Error ? e.message : "Could not update this watch.",
+      );
+    }
+  }
+
+  async function removeWatch(id: string): Promise<void> {
+    if (
+      !window.confirm("Stop tracking this product? Past alerts are kept.")
+    ) {
+      return;
+    }
+    setWatchesError(null);
+    try {
+      const response = await fetch(
+        `/api/memory/watches?id=${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        throw new Error("Could not remove this watch.");
+      }
+      setWatchesNotice("Watch removed.");
+      await loadWatches();
+    } catch (e) {
+      setWatchesError(
+        e instanceof Error ? e.message : "Could not remove this watch.",
+      );
+    }
+  }
+
+  async function checkWatchNow(id: string): Promise<void> {
+    if (checkingId) {
+      return;
+    }
+    setCheckingId(id);
+    setWatchesError(null);
+    setWatchesNotice(null);
+    try {
+      const response = await fetch("/api/memory/watches/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const data = (await response.json()) as {
+        status: string;
+        error?: string;
+        observation?: { priceInr: number };
+        alert?: { observedPrice: number } | null;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Check failed.");
+      }
+      if (data.status !== "ok") {
+        setWatchesError(data.error ?? "Check failed.");
+      } else if (data.alert) {
+        setWatchesNotice(
+          `Target met at ${formatInr(data.alert.observedPrice)} — alert created.`,
+        );
+      } else if (data.observation) {
+        setWatchesNotice(
+          `Checked: ${formatInr(data.observation.priceInr)}.`,
+        );
+      } else {
+        setWatchesNotice("Checked.");
+      }
+      await loadWatches();
+      await loadAlerts();
+    } catch (e) {
+      setWatchesError(e instanceof Error ? e.message : "Check failed.");
+    } finally {
+      setCheckingId(null);
+    }
+  }
+
+  async function markAllAlertsRead(): Promise<void> {
+    try {
+      await fetch("/api/memory/alerts/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ all: true }),
+      });
+      await loadAlerts();
+    } catch {
+      // Badge quietly stays stale.
+    }
+  }
+
   async function fetchReviews(): Promise<void> {
     if (!verdict || !effectiveCategory || reviewsLoading) {
       return;
@@ -1992,7 +2472,9 @@ export default function Home() {
     }
   }
 
-  async function runSearch(): Promise<void> {
+  async function runSearch(next?: {
+    allowOverBudget?: boolean;
+  }): Promise<void> {
     if (
       !result ||
       !effectiveCategory ||
@@ -2002,14 +2484,11 @@ export default function Home() {
     ) {
       return;
     }
+    const over = next?.allowOverBudget ?? allowOverBudget;
+    setAllowOverBudget(over);
     let phase: "search" | "recommend" = "search";
+    clearDownstream();
     setStage("searching");
-    setSearch(null);
-    setVerdict(null);
-    setSearchError(null);
-    setVerdictError(null);
-    setCompareIds([]);
-    setShowCompare(false);
     try {
       const searchResponse = await fetch("/api/search", {
         method: "POST",
@@ -2018,6 +2497,7 @@ export default function Home() {
           query: result.intent.query,
           category: effectiveCategory,
           disabled,
+          allowOverBudget: over,
         }),
       });
       const searchData = (await searchResponse.json()) as SearchData & {
@@ -2038,7 +2518,7 @@ export default function Home() {
           intent: result.intent,
           requirements: reqs?.requirements,
           weights: normalizeWeights(weights),
-          allowOverBudget,
+          allowOverBudget: over,
           personalize: useProfile,
           products: searchData.products,
           statuses: searchData.statuses,
@@ -2124,6 +2604,48 @@ export default function Home() {
 
   const verdictLabel = (v: Recommendation["verdict"]): string =>
     v.replace(/_/g, " ");
+
+  function watchStatusChip(entry: EnrichedWatch): {
+    label: string;
+    className: string;
+  } {
+    const base = "rounded-full border px-2 py-0.5 text-[11px] font-semibold";
+    const { watch, latest, stats } = entry;
+    if (!watch.active) {
+      return {
+        label: "Paused",
+        className: `${base} border-white/10 bg-white/5 text-stone-400`,
+      };
+    }
+    if (watch.lastCheck && watch.lastCheck.status !== "ok") {
+      const label =
+        watch.lastCheck.status === "unavailable"
+          ? "Unavailable"
+          : watch.lastCheck.status === "no-price"
+            ? "No price found"
+            : "Check failed";
+      return {
+        label,
+        className: `${base} border-rose-300/30 bg-rose-300/10 text-rose-200`,
+      };
+    }
+    if (latest && latest.priceInr <= watch.targetPrice) {
+      return {
+        label: "Target met",
+        className: `${base} border-teal-300/30 bg-teal-300/10 text-teal-200`,
+      };
+    }
+    if (!latest || stats.stale) {
+      return {
+        label: "No recent data",
+        className: `${base} border-white/10 bg-white/5 text-stone-400`,
+      };
+    }
+    return {
+      label: "Watching",
+      className: `${base} border-sky-300/30 bg-sky-300/10 text-sky-200`,
+    };
+  }
 
   const verdictProduct =
     verdict?.recommendation.productId != null
@@ -2308,23 +2830,45 @@ export default function Home() {
               {proposalCount > 0 ? `Suggestions (${proposalCount})` : "Suggestions"}
             </span>
           </button>
+          <button
+            type="button"
+            onClick={openWatches}
+            aria-expanded={watchesOpen}
+            aria-label={
+              unreadAlerts > 0
+                ? `Watchlist, ${unreadAlerts} unread alerts`
+                : "Watchlist"
+            }
+            className={
+              watchesOpen
+                ? "rounded-l-lg border border-r-0 border-teal-300/50 bg-teal-300/10 px-3 py-6 shadow-lg backdrop-blur-xl"
+                : "rounded-l-lg border border-r-0 border-white/15 bg-stone-950/90 px-3 py-6 shadow-lg backdrop-blur-xl transition hover:border-teal-300/50"
+            }
+          >
+            <span className="[writing-mode:vertical-rl] rotate-180 text-sm font-semibold tracking-wide text-stone-200">
+              {unreadAlerts > 0 ? `Watchlist (${unreadAlerts})` : "Watchlist"}
+            </span>
+          </button>
         </div>
       )}
 
-      {(prefsOpen || proposalsOpen) && (
+      {(prefsOpen || proposalsOpen || watchesOpen) && (
         <button
           type="button"
           aria-label="Close panel"
           onClick={() => {
             setPrefsOpen(false);
             setProposalsOpen(false);
+            setWatchesOpen(false);
           }}
           className="fixed inset-0 z-40 h-full w-full cursor-default bg-black/60"
         />
       )}
-      {(prefsOpen || proposalsOpen) && (
+      {(prefsOpen || proposalsOpen || watchesOpen) && (
         <section
-          aria-label={prefsOpen ? "Preferences" : "Suggestions"}
+          aria-label={
+            prefsOpen ? "Preferences" : proposalsOpen ? "Suggestions" : "Watchlist"
+          }
           role="dialog"
           aria-modal="true"
           className="fixed top-0 right-0 z-40 h-full w-full max-w-lg overflow-y-auto border-l border-white/10 bg-stone-950/95 p-5 pr-12 shadow-2xl backdrop-blur-xl motion-safe:animate-[drawer-in_0.25s_ease-out]"
@@ -2649,7 +3193,7 @@ export default function Home() {
                 </>
               )}
             </div>
-          ) : (
+          ) : proposalsOpen ? (
             <div>
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -2784,6 +3328,301 @@ export default function Home() {
               {proposalsNotice && (
                 <p className="mt-3 text-xs text-teal-200">{proposalsNotice}</p>
               )}
+            </div>
+          ) : (
+            <div>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-stone-100">
+                    Watchlist
+                  </h2>
+                  <p className="mt-1 text-xs text-stone-500">
+                    Track prices toward a target. Checks run automatically
+                    while the server runs — or tap Check now anytime.
+                  </p>
+                  {monitor && (
+                    <p className="mt-1 text-xs text-stone-500">
+                      {monitor.active
+                        ? `Auto-checks on · every ${monitor.intervalMinutes} min`
+                        : "Auto-checks off in this session"}
+                      {" · "}
+                      {monitor.emailConfigured
+                        ? "email alerts on"
+                        : "email alerts off"}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setWatchesOpen(false)}
+                  className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                >
+                  Close
+                </button>
+              </div>
+              {trackDraft && (
+                <div className="mt-4 rounded-xl border border-teal-300/30 bg-teal-300/5 p-3">
+                  <p
+                    className="truncate text-sm font-medium text-stone-100"
+                    title={trackDraft.title}
+                  >
+                    {trackDraft.title}
+                  </p>
+                  <p className="mt-0.5 text-xs text-stone-500">
+                    {trackDraft.merchant}
+                    {trackDraft.currentPrice != null
+                      ? ` · now ${formatInr(trackDraft.currentPrice)}`
+                      : ""}
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-end gap-2">
+                    <label className="block text-xs text-stone-400">
+                      Target price (₹)
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={trackDraft.target}
+                        onChange={(event) =>
+                          setTrackDraft((prev) =>
+                            prev
+                              ? { ...prev, target: event.target.value }
+                              : prev,
+                          )
+                        }
+                        placeholder="e.g. 40000"
+                        className="mt-1 w-32 rounded-lg border border-white/10 bg-white/5 p-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                      />
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-1.5 pb-2 text-xs text-stone-400">
+                      <input
+                        type="checkbox"
+                        checked={trackDraft.canWait}
+                        onChange={() =>
+                          setTrackDraft((prev) =>
+                            prev ? { ...prev, canWait: !prev.canWait } : prev,
+                          )
+                        }
+                        className="h-4 w-4 accent-teal-300"
+                      />
+                      I can wait
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => void createWatch()}
+                      disabled={creatingWatch}
+                      className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {creatingWatch ? "Tracking…" : "Track"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTrackDraft(null)}
+                      className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+              {watchesLoading ? (
+                <p className="mt-4 text-sm text-stone-500">Loading…</p>
+              ) : watchesError ? (
+                <p className="mt-4 rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-200">
+                  {watchesError}
+                </p>
+              ) : enrichedWatches.length === 0 ? (
+                <p className="mt-4 text-sm text-stone-400">
+                  Nothing tracked yet. Tap “Track price” on any product card
+                  to watch it here.
+                </p>
+              ) : (
+                <ul className="mt-4 space-y-3">
+                  {enrichedWatches.map((entry) => {
+                    const chip = watchStatusChip(entry);
+                    const busy = checkingId === entry.watch.id;
+                    return (
+                      <li
+                        key={entry.watch.id}
+                        className="rounded-xl border border-white/10 bg-white/[0.03] p-3"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <a
+                              href={entry.watch.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={entry.watch.title}
+                              className="block truncate text-sm font-medium text-stone-100 hover:text-teal-200 hover:underline"
+                            >
+                              {entry.watch.title}
+                            </a>
+                            <p className="mt-0.5 text-xs text-stone-500">
+                              {entry.watch.merchant} · target{" "}
+                              {formatInr(entry.watch.targetPrice)}
+                              {entry.latest
+                                ? ` · now ${formatInr(entry.latest.priceInr)}`
+                                : " · no data yet"}
+                            </p>
+                            {entry.stats.count >= 2 &&
+                              entry.stats.min &&
+                              entry.stats.max && (
+                                <p className="mt-0.5 text-xs text-stone-500">
+                                  Low {formatInr(entry.stats.min.priceInr)} ·
+                                  high {formatInr(entry.stats.max.priceInr)} ·{" "}
+                                  {entry.stats.count} checks in{" "}
+                                  {entry.stats.windowDays}d
+                                </p>
+                              )}
+                            {entry.watch.lastCheck && (
+                              <p className="mt-0.5 text-xs text-stone-500">
+                                Last checked{" "}
+                                {formatSavedDate(entry.watch.lastCheck.at)}
+                                {entry.watch.lastCheck.status !== "ok" &&
+                                entry.watch.lastCheck.error
+                                  ? ` · ${entry.watch.lastCheck.error}`
+                                  : ""}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex shrink-0 flex-col items-end gap-1">
+                            <span className={chip.className}>{chip.label}</span>
+                            {entry.unreadAlerts > 0 && (
+                              <span className="rounded-full bg-teal-300 px-1.5 py-px text-[10px] font-semibold text-teal-950">
+                                {entry.unreadAlerts} new
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        {editingWatchId === entry.watch.id ? (
+                          <div className="mt-2 flex flex-wrap items-end gap-2">
+                            <label className="block text-xs text-stone-400">
+                              Target price (₹)
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                value={editTarget}
+                                onChange={(event) =>
+                                  setEditTarget(event.target.value)
+                                }
+                                className="mt-1 w-32 rounded-lg border border-white/10 bg-white/5 p-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => void saveWatchTarget(entry.watch.id)}
+                              className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-stone-950 transition hover:bg-teal-200"
+                            >
+                              Save
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingWatchId(null)}
+                              className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void checkWatchNow(entry.watch.id)}
+                              className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {busy ? "Checking…" : "Check now"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingWatchId(entry.watch.id);
+                                setEditTarget(String(entry.watch.targetPrice));
+                                setWatchesError(null);
+                              }}
+                              className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                            >
+                              Edit target
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void toggleWatchActive(entry)}
+                              className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                            >
+                              {entry.watch.active ? "Pause" : "Resume"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void removeWatch(entry.watch.id)}
+                              className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {watchesNotice && (
+                <p className="mt-3 text-xs text-teal-200">{watchesNotice}</p>
+              )}
+              <div className="mt-6 border-t border-white/10 pt-4">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-stone-200">
+                    Alerts
+                  </h3>
+                  {unreadAlerts > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void markAllAlertsRead()}
+                      className="text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                    >
+                      Mark all read
+                    </button>
+                  )}
+                </div>
+                {alerts.length === 0 ? (
+                  <p className="mt-2 text-xs text-stone-500">
+                    No alerts yet. You&apos;ll be notified here (and by email,
+                    if configured) when a target is met.
+                  </p>
+                ) : (
+                  <ul className="mt-2 space-y-2">
+                    {alerts.map((alert) => (
+                      <li
+                        key={alert.id}
+                        className={
+                          alert.read
+                            ? "rounded-xl border border-white/10 bg-white/[0.02] p-3"
+                            : "rounded-xl border border-teal-300/30 bg-teal-300/5 p-3"
+                        }
+                      >
+                        <a
+                          href={alert.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={alert.title}
+                          className="block truncate text-sm font-medium text-stone-100 hover:text-teal-200 hover:underline"
+                        >
+                          {alert.title}
+                        </a>
+                        <p className="mt-0.5 text-xs text-stone-400">
+                          {formatInr(alert.observedPrice)} · target{" "}
+                          {formatInr(alert.targetPrice)} ·{" "}
+                          {formatSavedDate(alert.observedAt)}
+                        </p>
+                        <p className="mt-0.5 text-xs text-stone-500">
+                          {alert.email?.sent
+                            ? "Emailed ✓"
+                            : alert.email?.attempted
+                              ? `Email failed${alert.email.error ? `: ${alert.email.error}` : ""}`
+                              : "In-app only"}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </div>
           )}
         </section>
@@ -3551,19 +4390,22 @@ export default function Home() {
                 {warning}
               </p>
             ))}
-            {verdict.excludedByBudget > 0 && (
+            {(verdict.excludedByBudget > 0 || allowOverBudget) && (
               <label className="mt-3 flex cursor-pointer items-center gap-2.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm transition hover:border-white/25">
                 <input
                   type="checkbox"
                   checked={allowOverBudget}
-                  disabled={recalcLoading}
+                  disabled={
+                    stage === "searching" || stage === "recommending"
+                  }
                   onChange={() =>
-                    void recalc({ allowOverBudget: !allowOverBudget })
+                    void runSearch({ allowOverBudget: !allowOverBudget })
                   }
                   className="h-4 w-4 accent-teal-300"
                 />
                 <span className="text-stone-300">
-                  Include near-budget options (up to 25% over)
+                  Include near-budget options (up to 25% over) — searches
+                  again with the wider budget
                 </span>
               </label>
             )}
@@ -3900,6 +4742,28 @@ export default function Home() {
                               ? `${formatInr(p.priceInr)}${p.priceEvidence === "single" ? " · seen once — confirm on site" : " · seen on page"}`
                               : "Price unavailable"}
                           </p>
+                          {(() => {
+                            const insight = insights[p.id];
+                            if (
+                              !insight ||
+                              insight.stats.count < 2 ||
+                              !insight.stats.min ||
+                              !insight.stats.max
+                            ) {
+                              return null;
+                            }
+                            return (
+                              <p className="mt-0.5 text-xs text-stone-500">
+                                Tracked: low{" "}
+                                {formatInr(insight.stats.min.priceInr)} · high{" "}
+                                {formatInr(insight.stats.max.priceInr)} ·{" "}
+                                {insight.stats.count} checks
+                                {insight.stats.changeVsPrevious
+                                  ? ` · ${insight.stats.changeVsPrevious.absoluteInr <= 0 ? "↓" : "↑"}${formatInr(Math.abs(insight.stats.changeVsPrevious.absoluteInr))} last move`
+                                  : ""}
+                              </p>
+                            );
+                          })()}
                           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm text-stone-400">
                             {p.rating != null ? (
                               <>
@@ -3917,16 +4781,25 @@ export default function Home() {
                             )}
                           </p>
                         </div>
-                        <label className="flex shrink-0 cursor-pointer items-start gap-1.5 text-xs text-stone-400">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            disabled={compareDisabled}
-                            onChange={() => toggleCompare(p.id)}
-                            className="mt-0.5 h-4 w-4 accent-teal-300 disabled:cursor-not-allowed"
-                          />
-                          Compare
-                        </label>
+                        <div className="flex shrink-0 flex-col items-end gap-2">
+                          <label className="flex cursor-pointer items-start gap-1.5 text-xs text-stone-400">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={compareDisabled}
+                              onChange={() => toggleCompare(p.id)}
+                              className="mt-0.5 h-4 w-4 accent-teal-300 disabled:cursor-not-allowed"
+                            />
+                            Compare
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => startTrack(p)}
+                            className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-teal-300/40 hover:text-teal-200"
+                          >
+                            Track price
+                          </button>
+                        </div>
                       </div>
                       {p.snippet && (
                         <p className="mt-2 line-clamp-3 text-sm text-stone-500">

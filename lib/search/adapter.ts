@@ -1,5 +1,6 @@
 import type { Category, ShoppingSource } from "../../config/sources";
 import type { Budget } from "../intent/types";
+import { extractRupeeAmounts, selectObservedPrice } from "../prices/extract";
 import {
   ProductSchema,
   productIdFor,
@@ -63,7 +64,6 @@ export function hostMatchesDomain(url: string, domain: string): boolean {
   }
 }
 
-const RUPEE_RE = /(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)/gi;
 const IMAGE_MD_RE = /!\[[^\]]*\]\(([^)\s]+)\)/g;
 
 const IMAGE_CHROME_KEYWORDS = [
@@ -105,21 +105,6 @@ const IMAGE_CHROME_KEYWORDS = [
   "downloadapp",
   "advertise",
 ];
-
-export function extractRupeeAmounts(text: string): number[] {
-  const amounts: number[] = [];
-  RUPEE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  let guard = 0;
-  while ((match = RUPEE_RE.exec(text)) !== null && guard < 500) {
-    guard += 1;
-    const value = Number.parseFloat((match[1] ?? "").replace(/,/g, ""));
-    if (Number.isFinite(value) && value >= 1 && value <= 10000000) {
-      amounts.push(Math.round(value));
-    }
-  }
-  return amounts;
-}
 
 function normalizeImageUrl(raw: string, pageUrl: string): string | undefined {
   const trimmed = raw.trim();
@@ -339,25 +324,9 @@ async function enrich(
   }
   const byUrl = new Map<string, Enrichment>();
   for (const page of pages) {
-    const amounts = extractRupeeAmounts(page.text);
-    let priceInr: number | undefined;
-    let evidence: PriceEvidence | undefined;
-    if (amounts.length > 0) {
-      const frequency = new Map<number, number>();
-      for (const amount of amounts) {
-        frequency.set(amount, (frequency.get(amount) ?? 0) + 1);
-      }
-      let best = amounts[0] as number;
-      let bestCount = 0;
-      for (const [amount, count] of frequency) {
-        if (count > bestCount) {
-          best = amount;
-          bestCount = count;
-        }
-      }
-      priceInr = best;
-      evidence = bestCount >= 2 ? "repeated" : "single";
-    }
+    const observed = selectObservedPrice(extractRupeeAmounts(page.text));
+    const priceInr = observed?.priceInr;
+    const evidence: PriceEvidence | undefined = observed?.evidence;
     const sourceId = sourceByUrl.get(page.url);
     const rating =
       sourceId && isProductUrl(page.url, sourceId)

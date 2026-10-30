@@ -1,15 +1,27 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { CategorySchema, enabledSourcesFor, SOURCES } from "../../../config/sources";
+import { sessionUserFromRequest } from "../../../lib/auth/require-session";
 import { resolveIntent } from "../../../lib/intent/service";
+import { FileMemoryStore } from "../../../lib/memory/file-store";
+import {
+  evaluateObservationsForUser,
+  recordProductPrices,
+} from "../../../lib/prices/check";
+import { notifierFromEnv } from "../../../lib/prices/notify";
 import { dedupeProducts } from "../../../lib/products/dedup";
 import { TavilySourceAdapter } from "../../../lib/search/adapter";
+import {
+  effectiveBudgetMax,
+  searchTermsWithBudget,
+} from "../../../lib/search/query";
 
 const BodySchema = z.object({
   query: z.string().trim().min(2).max(500),
   category: CategorySchema.optional(),
   disabled: z.record(z.string(), z.boolean()).optional(),
   maxResults: z.number().int().min(1).max(50).optional(),
+  allowOverBudget: z.boolean().optional(),
 });
 
 export async function POST(request: Request): Promise<NextResponse> {
@@ -57,13 +69,25 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
+  const flexible = parsed.data.allowOverBudget === true;
+  const effectiveMax = effectiveBudgetMax(intent.budgetInr, flexible);
   const adapter = new TavilySourceAdapter();
   const outcome = await adapter.search({
-    searchTerms: intent.searchTerms,
+    searchTerms: searchTermsWithBudget(
+      intent.searchTerms,
+      effectiveMax,
+      flexible,
+    ),
     category,
     sources,
     apiKey,
-    filters: { budgetInr: intent.budgetInr, maxResults: parsed.data.maxResults },
+    filters: {
+      budgetInr:
+        flexible && effectiveMax != null && intent.budgetInr
+          ? { ...intent.budgetInr, max: effectiveMax }
+          : intent.budgetInr,
+      maxResults: parsed.data.maxResults,
+    },
   });
 
   const { products, removed } = dedupeProducts(outcome.results);
@@ -87,6 +111,29 @@ export async function POST(request: Request): Promise<NextResponse> {
     warnings.push(
       `${nameOf(status.sourceId)} could not be searched: ${status.error ?? "unknown error"}.`,
     );
+  }
+
+  // Price history builds from normal use: persist fresh prices, then check
+  // the signed-in user's watches against them. Neither step may fail search.
+  try {
+    const store = new FileMemoryStore();
+    const observations = await recordProductPrices(store, products, "search");
+    const user = sessionUserFromRequest(request);
+    if (user && observations.length > 0) {
+      const alerts = await evaluateObservationsForUser({
+        store,
+        userSub: user.sub,
+        observations,
+        notifier: notifierFromEnv(),
+      });
+      if (alerts.length > 0) {
+        warnings.push(
+          `${alerts.length} price alert${alerts.length === 1 ? " was" : "s were"} triggered — see Watchlist.`,
+        );
+      }
+    }
+  } catch {
+    warnings.push("Price history was unavailable for this search.");
   }
 
   return NextResponse.json({

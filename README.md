@@ -107,6 +107,11 @@ If `npm` fails with EPERM on `~/.npm`, fix ownership once:
 | `WISORA_MUSE_BIN` | no | `muse` binary path (default `muse` on `PATH`) |
 | `WISORA_MUSE_BASE_URL` | no | Only if your key targets a non-default endpoint |
 | `WISORA_DATA_DIR` | no | Directory for per-user preference files (default `./data`, gitignored) |
+| `RESEND_API_KEY` | no | Resend key for price-alert emails; without it, alerts are in-app only |
+| `RESEND_FROM` | no | Verified sender address for alert emails (required together with the key, e.g. `Wisora <alerts@yourdomain.com>`) |
+| `WISORA_CHECK_INTERVAL_MINUTES` | no | Background watch-check interval in minutes (default `240` = 4h, min 5) |
+| `WISORA_MAX_CHECKS_PER_CYCLE` | no | Max watches re-checked per background cycle (default `10`, clamped 1–50) |
+| `WISORA_MONITORING` | no | Set to `off` to disable the background price monitor |
 
 All secrets stay server-side in `.env` (gitignored). They are never logged,
 never sent to the browser, and never printed by any script. Without keys the
@@ -126,8 +131,10 @@ Tata CLiQ, Nykaa Fashion.
 - `POST /api/intent` — `{ query }` → detected category, budget, search terms
 - `POST /api/requirements` — `{ query, intent?, answers? }` → requirement
   set + clarification questions + suggested category
-- `POST /api/search` — `{ query, category?, disabled?, maxResults? }` →
-  normalized products + per-source statuses + warnings
+- `POST /api/search` — `{ query, category?, disabled?, maxResults?,
+  allowOverBudget? }` → normalized products + per-source statuses +
+  warnings (`allowOverBudget` widens a stated budget max by 25% in the
+  search query so near-budget options can surface)
 - `POST /api/recommend` — full pipeline (or pass-through of `products` from
   `/api/search` to avoid re-searching; accepts `requirements`, `weights`,
   `allowOverBudget`, `personalize`) → ranked products with score breakdowns
@@ -158,6 +165,19 @@ Tata CLiQ, Nykaa Fashion.
   `confirmed` provenance
 - `DELETE /api/memory/history` — clear decisions, feedback, and
   proposals (saved items and the profile are kept)
+- `GET / POST / PUT / DELETE /api/memory/watches` — price watches:
+  `{ productId, url, title, merchant, targetPrice, canWait? }`; GET returns
+  watches enriched with latest observation, windowed stats, recent history,
+  and unread-alert counts; POST evaluates immediately against known history
+- `POST /api/memory/watches/check` — `{ id }` → re-check one watch now
+  (fresh page extract, observation, evaluation, alert on target met)
+- `GET /api/memory/alerts` — price alerts, newest-first (`?limit=`)
+- `POST /api/memory/alerts/read` — `{ all: true }` or `{ ids: [...] }`
+  marks alerts read
+- `GET /api/prices/insights?ids=a,b` — batch price history (1–10 ids) for
+  product cards: latest observation, stats, recent observations
+- `GET /api/prices/monitor` — background monitor status (active, interval,
+  email configured)
 
 ## Limitations (Phase 1)
 
