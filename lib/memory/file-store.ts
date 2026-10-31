@@ -9,6 +9,12 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import {
+  OpportunitySchema,
+  type NewOpportunity,
+  type Opportunity,
+  type OpportunityStatus,
+} from "../opportunities/schema";
+import {
   NewWatchSchema,
   PriceAlertSchema,
   PriceObservationSchema,
@@ -21,23 +27,42 @@ import {
   type WatchCheck,
   type WatchUpdate,
 } from "../prices/observation";
+import {
+  MonitorRunSchema,
+  type MonitorRun,
+  type NewMonitorRun,
+} from "../prices/run";
 import { UserProfileSchema, type UserProfile } from "./profile";
 import {
+  ChatThreadSchema,
   DecisionRecordSchema,
   FeedbackSchema,
   NewDecisionRecordSchema,
   NewFeedbackSchema,
+  NewReminderSchema,
   NewSavedComparisonSchema,
   NewSavedProductSchema,
+  NotificationSettingsSchema,
+  ReminderSchema,
   SavedComparisonSchema,
   SavedProductSchema,
   createRecordId,
+  defaultNotificationSettings,
+  type ChatThread,
   type DecisionRecord,
   type Feedback,
+  type NewChatMessage,
+  type NewChatThread,
   type NewDecisionRecord,
   type NewFeedback,
+  type NewReminder,
   type NewSavedComparison,
   type NewSavedProduct,
+  type NotificationSettings,
+  type NotificationSettingsPatch,
+  type Reminder,
+  type ReminderSystemUpdate,
+  type ReminderUpdate,
   type SavedComparison,
   type SavedProduct,
 } from "./records";
@@ -62,6 +87,9 @@ export class DuplicateWatchError extends Error {}
 /** The per-user watchlist cap was reached. */
 export class WatchlistFullError extends Error {}
 
+/** The per-user reminder cap was reached. */
+export class RemindersFullError extends Error {}
+
 /** Growth bounds per record file; oldest entries past the cap drop on write. */
 export const MAX_DECISIONS = 50;
 export const MAX_FEEDBACK = 100;
@@ -71,6 +99,11 @@ export const MAX_PROPOSALS = 50;
 export const MAX_OBSERVATIONS_PER_PRODUCT = 200;
 export const MAX_WATCHES = 50;
 export const MAX_ALERTS = 100;
+export const MAX_OPPORTUNITIES = 100;
+export const MAX_MONITOR_RUNS = 50;
+export const MAX_REMINDERS = 100;
+export const MAX_CHAT_THREADS = 20;
+export const MAX_CHAT_MESSAGES = 50;
 /** Same-price observations within this window are skipped, not duplicated. */
 export const OBS_SAME_PRICE_WINDOW_HOURS = 6;
 
@@ -669,44 +702,439 @@ export class FileMemoryStore implements MemoryStore {
     );
   }
 
-  async listWatchOwners(): Promise<string[]> {
-    const usersDir = path.join(this.rootDir, "users");
-    let entries: string[];
+  async listOpportunities(
+    userSub: string,
+    limit?: number,
+  ): Promise<Opportunity[]> {
+    const records = await this.readList(
+      this.listFile(userSub, "opportunities.json"),
+      (data) => {
+        const parsed = OpportunitySchema.array().safeParse(data);
+        return parsed.success ? parsed.data : null;
+      },
+    );
+    return limit === undefined ? records : records.slice(0, limit);
+  }
+
+  async saveOpportunity(
+    userSub: string,
+    input: NewOpportunity,
+  ): Promise<Opportunity> {
+    const file = this.listFile(userSub, "opportunities.json");
+    const records = await this.listOpportunities(userSub);
+    const record = OpportunitySchema.parse({
+      ...input,
+      id: createRecordId(),
+      createdAt: new Date().toISOString(),
+      status: "active",
+    });
+    await this.writeJson(
+      file,
+      [record, ...records].slice(0, MAX_OPPORTUNITIES),
+    );
+    await this.ensureIdentity(this.userDir(userSub), userSub);
+    return record;
+  }
+
+  async updateOpportunityStatus(
+    userSub: string,
+    id: string,
+    status: OpportunityStatus,
+  ): Promise<Opportunity | null> {
+    const file = this.listFile(userSub, "opportunities.json");
+    const records = await this.listOpportunities(userSub);
+    const index = records.findIndex((entry) => entry.id === id);
+    if (index < 0) {
+      return null;
+    }
+    const current = records[index];
+    if (current === undefined) {
+      return null;
+    }
+    const updated: Opportunity = { ...current, status };
+    await this.writeJson(file, [
+      ...records.slice(0, index),
+      updated,
+      ...records.slice(index + 1),
+    ]);
+    return updated;
+  }
+
+  async findOpportunityByDedupeKey(
+    userSub: string,
+    dedupeKey: string,
+  ): Promise<Opportunity | null> {
+    const records = await this.listOpportunities(userSub);
+    return records.find((entry) => entry.dedupeKey === dedupeKey) ?? null;
+  }
+
+  async updateOpportunityEmail(
+    userSub: string,
+    opportunityId: string,
+    email: { attempted: boolean; sent: boolean; error?: string },
+  ): Promise<void> {
+    const file = this.listFile(userSub, "opportunities.json");
+    const current = await this.listOpportunities(userSub);
+    await this.writeJson(
+      file,
+      current.map((entry) =>
+        entry.id === opportunityId ? { ...entry, email } : entry,
+      ),
+    );
+  }
+
+  async listReminders(userSub: string): Promise<Reminder[]> {
+    return this.readList(this.listFile(userSub, "reminders.json"), (data) => {
+      const parsed = ReminderSchema.array().safeParse(data);
+      return parsed.success ? parsed.data : null;
+    });
+  }
+
+  async saveReminder(
+    userSub: string,
+    input: NewReminder,
+  ): Promise<Reminder> {
+    const file = this.listFile(userSub, "reminders.json");
+    const valid = NewReminderSchema.parse(input);
+    const current = await this.listReminders(userSub);
+    if (current.length >= MAX_REMINDERS) {
+      throw new RemindersFullError(
+        `Reminder list is full (${MAX_REMINDERS}). Remove one first.`,
+      );
+    }
+    const record: Reminder = {
+      ...valid,
+      id: createRecordId(),
+      createdAt: new Date().toISOString(),
+      status: "active",
+    };
+    await this.writeJson(file, [record, ...current]);
+    await this.ensureIdentity(this.userDir(userSub), userSub);
+    return record;
+  }
+
+  async updateReminder(
+    userSub: string,
+    update: ReminderUpdate | ReminderSystemUpdate,
+  ): Promise<Reminder | null> {
+    const file = this.listFile(userSub, "reminders.json");
+    const current = await this.listReminders(userSub);
+    const index = current.findIndex((entry) => entry.id === update.id);
+    if (index < 0) {
+      return null;
+    }
+    const found = current[index];
+    if (found === undefined) {
+      return null;
+    }
+    const next: Reminder = { ...found };
+    if (update.status !== undefined) {
+      next.status = update.status;
+      if (update.status !== "done") {
+        // Re-arming clears the previous firing record.
+        delete next.firedAt;
+        delete next.firedBecause;
+      }
+    }
+    if ("firedAt" in update) {
+      next.firedAt = update.firedAt;
+      next.firedBecause = update.firedBecause;
+    }
+    if ("title" in update && update.title !== undefined) {
+      next.title = update.title;
+    }
+    if ("remindAt" in update && update.remindAt !== undefined) {
+      next.remindAt = update.remindAt;
+    }
+    if ("timezone" in update && update.timezone !== undefined) {
+      next.timezone = update.timezone;
+    }
+    if ("note" in update && update.note !== undefined) {
+      if (update.note === null) {
+        delete next.note;
+      } else {
+        next.note = update.note;
+      }
+    }
+    if ("targetPriceInr" in update && update.targetPriceInr !== undefined) {
+      if (update.targetPriceInr === null) {
+        delete next.targetPriceInr;
+      } else {
+        next.targetPriceInr = update.targetPriceInr;
+      }
+    }
+    const valid = ReminderSchema.parse(next);
+    await this.writeJson(file, [
+      ...current.slice(0, index),
+      valid,
+      ...current.slice(index + 1),
+    ]);
+    await this.ensureIdentity(this.userDir(userSub), userSub);
+    return valid;
+  }
+
+  async deleteReminder(userSub: string, id: string): Promise<boolean> {
+    const file = this.listFile(userSub, "reminders.json");
+    const current = await this.listReminders(userSub);
+    const next = current.filter((entry) => entry.id !== id);
+    if (next.length === current.length) {
+      return false;
+    }
+    await this.writeJson(file, next);
+    return true;
+  }
+
+  async updateReminderEmail(
+    userSub: string,
+    reminderId: string,
+    email: { attempted: boolean; sent: boolean; error?: string },
+  ): Promise<void> {
+    const file = this.listFile(userSub, "reminders.json");
+    const current = await this.listReminders(userSub);
+    await this.writeJson(
+      file,
+      current.map((entry) =>
+        entry.id === reminderId ? { ...entry, email } : entry,
+      ),
+    );
+  }
+
+  async getNotificationSettings(
+    userSub: string,
+  ): Promise<NotificationSettings> {
+    const file = this.listFile(userSub, "settings.json");
+    let raw: string;
     try {
-      entries = await readdir(usersDir);
+      raw = await readFile(file, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return defaultNotificationSettings();
+      }
+      throw error;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      await this.quarantine(file);
+      return defaultNotificationSettings();
+    }
+    const valid = NotificationSettingsSchema.safeParse(parsed);
+    if (!valid.success) {
+      await this.quarantine(file);
+      return defaultNotificationSettings();
+    }
+    return valid.data;
+  }
+
+  async saveNotificationSettings(
+    userSub: string,
+    patch: NotificationSettingsPatch,
+  ): Promise<NotificationSettings> {
+    const file = this.listFile(userSub, "settings.json");
+    const current = await this.getNotificationSettings(userSub);
+    const valid = NotificationSettingsSchema.parse({
+      ...current,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    });
+    await this.writeJson(file, valid);
+    await this.ensureIdentity(this.userDir(userSub), userSub);
+    return valid;
+  }
+
+  async listChatThreads(userSub: string): Promise<ChatThread[]> {
+    return this.readList(this.listFile(userSub, "chat.json"), (data) => {
+      const parsed = ChatThreadSchema.array().safeParse(data);
+      return parsed.success ? parsed.data : null;
+    });
+  }
+
+  async getChatThread(
+    userSub: string,
+    id: string,
+  ): Promise<ChatThread | null> {
+    const threads = await this.listChatThreads(userSub);
+    return threads.find((thread) => thread.id === id) ?? null;
+  }
+
+  async createChatThread(
+    userSub: string,
+    input: NewChatThread,
+  ): Promise<ChatThread> {
+    const file = this.listFile(userSub, "chat.json");
+    const records = await this.listChatThreads(userSub);
+    const now = new Date().toISOString();
+    const record = ChatThreadSchema.parse({
+      id: createRecordId(),
+      createdAt: now,
+      updatedAt: now,
+      title: input.title.slice(0, 120),
+      messages: [
+        {
+          id: createRecordId(),
+          role: input.firstMessage.role,
+          text: input.firstMessage.text,
+          createdAt: now,
+        },
+      ],
+    });
+    await this.writeJson(file, [record, ...records].slice(0, MAX_CHAT_THREADS));
+    await this.ensureIdentity(this.userDir(userSub), userSub);
+    return record;
+  }
+
+  async appendChatMessages(
+    userSub: string,
+    threadId: string,
+    messages: NewChatMessage[],
+  ): Promise<ChatThread | null> {
+    const file = this.listFile(userSub, "chat.json");
+    const records = await this.listChatThreads(userSub);
+    const index = records.findIndex((thread) => thread.id === threadId);
+    if (index < 0) {
+      return null;
+    }
+    const current = records[index];
+    if (current === undefined) {
+      return null;
+    }
+    const now = new Date().toISOString();
+    const stamped = messages.map((entry) => ({
+      id: createRecordId(),
+      role: entry.role,
+      text: entry.text,
+      createdAt: now,
+      ...(entry.sources ? { sources: entry.sources } : {}),
+    }));
+    const updated = ChatThreadSchema.parse({
+      ...current,
+      updatedAt: now,
+      messages: [...current.messages, ...stamped].slice(-MAX_CHAT_MESSAGES),
+    });
+    await this.writeJson(file, [
+      ...records.slice(0, index),
+      updated,
+      ...records.slice(index + 1),
+    ]);
+    return updated;
+  }
+
+  async deleteChatThread(userSub: string, id: string): Promise<boolean> {
+    const file = this.listFile(userSub, "chat.json");
+    const current = await this.listChatThreads(userSub);
+    const next = current.filter((thread) => thread.id !== id);
+    if (next.length === current.length) {
+      return false;
+    }
+    await this.writeJson(file, next);
+    return true;
+  }
+
+  private monitorRunsFile(): string {
+    return path.join(this.rootDir, "prices", "monitor-runs.json");
+  }
+
+  async recordMonitorRun(input: NewMonitorRun): Promise<MonitorRun> {
+    const file = this.monitorRunsFile();
+    const records = await this.listMonitorRuns();
+    const record = MonitorRunSchema.parse({
+      ...input,
+      id: createRecordId(),
+    });
+    await this.writeJson(file, [record, ...records].slice(0, MAX_MONITOR_RUNS));
+    return record;
+  }
+
+  async listMonitorRuns(limit?: number): Promise<MonitorRun[]> {
+    const records = await this.readList(this.monitorRunsFile(), (data) => {
+      const parsed = MonitorRunSchema.array().safeParse(data);
+      return parsed.success ? parsed.data : null;
+    });
+    return limit === undefined ? records : records.slice(0, limit);
+  }
+
+  private async userSubForDir(dir: string): Promise<string | null> {
+    try {
+      const identity = JSON.parse(
+        await readFile(path.join(dir, "identity.json"), "utf8"),
+      ) as { userSub?: unknown };
+      if (typeof identity.userSub === "string" && identity.userSub) {
+        return identity.userSub;
+      }
+    } catch {
+      // Fall through to the profile fallback below.
+    }
+    try {
+      const profile = JSON.parse(
+        await readFile(path.join(dir, "profile.json"), "utf8"),
+      ) as { userSub?: unknown };
+      if (typeof profile.userSub === "string" && profile.userSub) {
+        return profile.userSub;
+      }
+    } catch {
+      // Unidentifiable dir — nothing to monitor.
+    }
+    return null;
+  }
+
+  private async listUserDirs(): Promise<string[]> {
+    const usersDir = path.join(this.rootDir, "users");
+    try {
+      const entries = await readdir(usersDir);
+      return entries.map((entry) => path.join(usersDir, entry));
     } catch {
       return [];
     }
+  }
+
+  async listWatchOwners(): Promise<string[]> {
     const owners: string[] = [];
-    for (const entry of entries) {
-      const dir = path.join(usersDir, entry);
+    for (const dir of await this.listUserDirs()) {
+      let watches: unknown[];
       try {
-        const watches = await this.readList(
+        watches = await this.readList(
           path.join(dir, "watches.json"),
           (data) => (Array.isArray(data) ? (data as unknown[]) : null),
         );
-        if (watches.length === 0) {
-          continue;
-        }
-        const identity = JSON.parse(
-          await readFile(path.join(dir, "identity.json"), "utf8"),
-        ) as { userSub?: unknown };
-        if (typeof identity.userSub === "string" && identity.userSub) {
-          owners.push(identity.userSub);
-          continue;
-        }
       } catch {
-        // Fall through to the profile fallback below.
+        continue;
       }
+      if (watches.length === 0) {
+        continue;
+      }
+      const userSub = await this.userSubForDir(dir);
+      if (userSub) {
+        owners.push(userSub);
+      }
+    }
+    return owners;
+  }
+
+  async listReminderOwners(): Promise<string[]> {
+    const owners: string[] = [];
+    for (const dir of await this.listUserDirs()) {
+      let reminders: unknown[];
       try {
-        const profile = JSON.parse(
-          await readFile(path.join(dir, "profile.json"), "utf8"),
-        ) as { userSub?: unknown };
-        if (typeof profile.userSub === "string" && profile.userSub) {
-          owners.push(profile.userSub);
-        }
+        reminders = await this.readList(
+          path.join(dir, "reminders.json"),
+          (data) => (Array.isArray(data) ? (data as unknown[]) : null),
+        );
       } catch {
-        // Unidentifiable dir — nothing to monitor.
+        continue;
+      }
+      const hasActive = reminders.some(
+        (entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          (entry as { status?: unknown }).status === "active",
+      );
+      if (!hasActive) {
+        continue;
+      }
+      const userSub = await this.userSubForDir(dir);
+      if (userSub) {
+        owners.push(userSub);
       }
     }
     return owners;

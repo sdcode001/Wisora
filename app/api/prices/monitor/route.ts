@@ -3,6 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
+import { FileMemoryStore } from "../../../../lib/memory/file-store";
 import {
   isMonitoringActive,
   monitorConfigFromEnv,
@@ -19,6 +20,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return unauthenticatedResponse();
   }
   const config = monitorConfigFromEnv();
+  const store = new FileMemoryStore();
+  const runs = await store.listMonitorRuns(1);
   return NextResponse.json({
     monitoring: {
       active: isMonitoringActive(),
@@ -28,6 +31,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       emailConfigured: Boolean(
         process.env.RESEND_API_KEY && process.env.RESEND_FROM,
       ),
+      lastRun: runs[0] ?? null,
     },
   });
 }

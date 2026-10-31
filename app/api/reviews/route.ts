@@ -19,7 +19,7 @@ const BodySchema = z.object({
     .array(
       z.object({
         id: z.string().min(1),
-        title: z.string().min(1).max(300),
+        title: z.string().min(1).max(500),
         url: z.string().url().optional(),
       }),
     )

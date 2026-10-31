@@ -41,6 +41,7 @@ function silentNotifier(): Notifier {
   return {
     available: false,
     sendAlert: async () => ({ sent: false, error: "email off in tests" }),
+    sendEmail: async () => ({ sent: false, error: "email off in tests" }),
   };
 }
 
@@ -133,6 +134,188 @@ test("a cycle checks due watches and skips the rest", async () => {
   expect((await store.getWatch("user-2", fresh.id))?.lastCheck?.priceInr).toBe(
     45000,
   );
+});
+
+test("a cycle creates opportunities and records the run", async () => {
+  process.env.WISORA_DATA_DIR = await mkdtemp(
+    path.join(tmpdir(), "wisora-monitor-"),
+  );
+  const store = new FileMemoryStore();
+  const now = new Date("2026-02-10T12:00:00.000Z").getTime();
+  await store.saveWatch(
+    "user-1",
+    watchInput(40000, "https://www.amazon.in/dp/B0OPP"),
+  );
+  const result = await runMonitoringCycle({
+    store,
+    fetchPage: async () => "Deal price ₹39,000 today only. ₹39,000!",
+    notifier: silentNotifier(),
+    config: { intervalMinutes: 240, maxChecksPerCycle: 10 },
+    nowMs: now,
+  });
+  expect(result).toMatchObject({
+    checked: 1,
+    ok: 1,
+    alerts: 1,
+    opportunities: 1,
+  });
+  const opportunities = await store.listOpportunities("user-1");
+  expect(opportunities).toHaveLength(1);
+  expect(opportunities[0]).toMatchObject({
+    kind: "target-reached",
+    status: "active",
+    currentPriceInr: 39000,
+  });
+  const runs = await store.listMonitorRuns();
+  expect(runs).toHaveLength(1);
+  expect(runs[0]).toMatchObject({
+    checked: 1,
+    ok: 1,
+    alerts: 1,
+    opportunities: 1,
+  });
+});
+
+test("a cycle fires due reminders", async () => {
+  process.env.WISORA_DATA_DIR = await mkdtemp(
+    path.join(tmpdir(), "wisora-monitor-"),
+  );
+  const store = new FileMemoryStore();
+  const now = new Date("2026-02-10T12:00:00.000Z").getTime();
+  await store.saveReminder("user-1", {
+    title: "Revisit the laptop",
+    kind: "one-time",
+    remindAt: new Date(now - 1000).toISOString(),
+    timezone: "UTC",
+    productId: "preminder",
+    url: "https://www.amazon.in/dp/B0REM",
+    merchant: "Amazon India",
+  });
+  const result = await runMonitoringCycle({
+    store,
+    fetchPage: async () => null,
+    notifier: silentNotifier(),
+    config: { intervalMinutes: 240, maxChecksPerCycle: 10 },
+    nowMs: now,
+  });
+  expect(result).toMatchObject({
+    checked: 0,
+    remindersFired: 1,
+    opportunities: 1,
+  });
+  const runs = await store.listMonitorRuns();
+  expect(runs[0]).toMatchObject({ remindersFired: 1, opportunities: 1 });
+});
+
+test("cycles email fresh opportunities to the watch address", async () => {
+  process.env.WISORA_DATA_DIR = await mkdtemp(
+    path.join(tmpdir(), "wisora-monitor-"),
+  );
+  const store = new FileMemoryStore();
+  const now = new Date("2026-02-10T12:00:00.000Z").getTime();
+  const watch = await store.saveWatch(
+    "user-1",
+    watchInput(40000, "https://www.amazon.in/dp/B0EMAIL"),
+  );
+  await store.updateWatch("user-1", {
+    id: watch.id,
+    notifyEmail: "user@example.com",
+  });
+  const calls: string[] = [];
+  const result = await runMonitoringCycle({
+    store,
+    fetchPage: async () => "Deal price ₹39,000 today only. ₹39,000!",
+    notifier: {
+      available: true,
+      sendAlert: async () => ({ sent: true }),
+      sendEmail: async (input) => {
+        calls.push(`${input.to}|${input.subject}`);
+        return { sent: true };
+      },
+    },
+    config: { intervalMinutes: 240, maxChecksPerCycle: 10 },
+    nowMs: now,
+  });
+  expect(result).toMatchObject({ opportunities: 1, emails: 1 });
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toContain("user@example.com");
+  expect(calls[0]).toContain("Target reached");
+  const opportunities = await store.listOpportunities("user-1");
+  expect(opportunities[0]?.email).toMatchObject({
+    attempted: true,
+    sent: true,
+  });
+});
+
+test("proactive-off users keep checks but get no opportunities", async () => {
+  process.env.WISORA_DATA_DIR = await mkdtemp(
+    path.join(tmpdir(), "wisora-monitor-"),
+  );
+  const store = new FileMemoryStore();
+  const now = new Date("2026-02-10T12:00:00.000Z").getTime();
+  await store.saveWatch(
+    "user-1",
+    watchInput(40000, "https://www.amazon.in/dp/B0QUIET"),
+  );
+  await store.saveReminder("user-1", {
+    title: "Due reminder",
+    kind: "one-time",
+    remindAt: new Date(now - 1000).toISOString(),
+    timezone: "UTC",
+  });
+  await store.saveNotificationSettings("user-1", { proactiveEnabled: false });
+  const result = await runMonitoringCycle({
+    store,
+    fetchPage: async () => "Deal price ₹39,000 today only. ₹39,000!",
+    notifier: silentNotifier(),
+    config: { intervalMinutes: 240, maxChecksPerCycle: 10 },
+    nowMs: now,
+  });
+  // The check and its target alert still run; proactive outputs pause.
+  expect(result).toMatchObject({
+    checked: 1,
+    ok: 1,
+    alerts: 1,
+    opportunities: 0,
+    remindersFired: 0,
+    emails: 0,
+  });
+  expect(await store.listOpportunities("user-1")).toHaveLength(0);
+  expect((await store.listReminders("user-1"))[0]?.status).toBe("active");
+});
+
+test("repeat cycles deduplicate opportunities", async () => {
+  process.env.WISORA_DATA_DIR = await mkdtemp(
+    path.join(tmpdir(), "wisora-monitor-"),
+  );
+  const store = new FileMemoryStore();
+  const now = new Date("2026-02-10T12:00:00.000Z").getTime();
+  const fetchPage = async () => "Deal price ₹39,000 today only. ₹39,000!";
+  await store.saveWatch(
+    "user-1",
+    watchInput(40000, "https://www.amazon.in/dp/B0DUP"),
+  );
+  const config = { intervalMinutes: 240, maxChecksPerCycle: 10 };
+  const first = await runMonitoringCycle({
+    store,
+    fetchPage,
+    notifier: silentNotifier(),
+    config,
+    nowMs: now,
+  });
+  expect(first.opportunities).toBe(1);
+  // Five hours later the watch is due again at the same price: the check
+  // runs, but no second opportunity is created for the same state.
+  const second = await runMonitoringCycle({
+    store,
+    fetchPage,
+    notifier: silentNotifier(),
+    config,
+    nowMs: now + 5 * 3600000,
+  });
+  expect(second).toMatchObject({ checked: 1, ok: 1, opportunities: 0 });
+  expect(await store.listOpportunities("user-1")).toHaveLength(1);
+  expect(await store.listMonitorRuns()).toHaveLength(2);
 });
 
 test("cycles respect the per-cycle cap and isolate failures", async () => {

@@ -1,5 +1,13 @@
 import type { MemoryStore } from "../memory/store";
 import { FileMemoryStore } from "../memory/file-store";
+import {
+  detectionThresholdsFromEnv,
+  type DetectionThresholds,
+} from "../opportunities/detect";
+import { maybeSendOpportunityEmail } from "../opportunities/email";
+import { evaluateWatchForOpportunities } from "../opportunities/evaluate";
+import { maybeSendReminderEmail } from "../reminders/email";
+import { fireDueReminders } from "../reminders/fire";
 import type { Watch } from "./observation";
 import {
   runWatchCheck,
@@ -43,6 +51,10 @@ export interface CycleResult {
   ok: number;
   failed: number;
   alerts: number;
+  opportunities: number;
+  remindersFired: number;
+  /** Opportunity/reminder emails sent (watch-target alert emails excluded). */
+  emails: number;
   errors: string[];
 }
 
@@ -64,11 +76,14 @@ export async function runMonitoringCycle(args: {
   fetchPage: PageFetcher;
   notifier: Notifier;
   config: MonitorConfig;
+  thresholds?: DetectionThresholds;
   nowMs?: number;
 }): Promise<CycleResult> {
   const { store, fetchPage, notifier, config } = args;
+  const thresholds = args.thresholds ?? detectionThresholdsFromEnv();
   const nowMs = args.nowMs ?? Date.now();
   const now = new Date(nowMs).toISOString();
+  const startedAt = new Date().toISOString();
   const intervalMs = config.intervalMinutes * 60 * 1000;
   const result: CycleResult = {
     ownersScanned: 0,
@@ -77,7 +92,49 @@ export async function runMonitoringCycle(args: {
     ok: 0,
     failed: 0,
     alerts: 0,
+    opportunities: 0,
+    remindersFired: 0,
+    emails: 0,
     errors: [],
+  };
+  // Per-cycle proactive cache: one settings read per user per cycle.
+  const proactiveCache = new Map<string, boolean>();
+  const isProactive = async (userSub: string): Promise<boolean> => {
+    const cached = proactiveCache.get(userSub);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const enabled = await store
+      .getNotificationSettings(userSub)
+      .then((settings) => settings.proactiveEnabled)
+      .catch(() => true);
+    proactiveCache.set(userSub, enabled);
+    return enabled;
+  };
+  const finish = async (): Promise<CycleResult> => {
+    try {
+      await store.recordMonitorRun({
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        intervalMinutes: config.intervalMinutes,
+        maxChecksPerCycle: config.maxChecksPerCycle,
+        ownersScanned: result.ownersScanned,
+        due: result.due,
+        checked: result.checked,
+        ok: result.ok,
+        failed: result.failed,
+        alerts: result.alerts,
+        opportunities: result.opportunities,
+        remindersFired: result.remindersFired,
+        emails: result.emails,
+        errors: result.errors.slice(0, 10),
+      });
+    } catch (error) {
+      result.errors.push(
+        `Run log failed: ${error instanceof Error ? error.message.slice(0, 150) : "unknown error"}`,
+      );
+    }
+    return result;
   };
   let owners: string[];
   try {
@@ -86,7 +143,7 @@ export async function runMonitoringCycle(args: {
     result.errors.push(
       error instanceof Error ? error.message.slice(0, 200) : "Owner scan failed.",
     );
-    return result;
+    return finish();
   }
   result.ownersScanned = owners.length;
   const due: Array<{ userSub: string; watch: Watch }> = [];
@@ -116,6 +173,7 @@ export async function runMonitoringCycle(args: {
   result.due = due.length;
   for (const { userSub, watch } of due.slice(0, config.maxChecksPerCycle)) {
     try {
+      const previousStatus = watch.lastCheck?.status;
       const outcome = await runWatchCheck({
         store,
         userSub,
@@ -133,6 +191,50 @@ export async function runMonitoringCycle(args: {
       if (outcome.alert) {
         result.alerts += 1;
       }
+      // Fresh state only: transient failures re-evaluate nothing.
+      // Users who disabled proactive cards keep checks and target alerts,
+      // but get no new opportunities or emails from this cycle.
+      if (
+        (outcome.status === "ok" || outcome.status === "unavailable") &&
+        (await isProactive(userSub))
+      ) {
+        try {
+          const evaluated = await evaluateWatchForOpportunities({
+            store,
+            userSub,
+            watch: outcome.watch,
+            previousStatus,
+            thresholds,
+            nowMs,
+          });
+          result.opportunities += evaluated.created.length;
+          for (const opportunity of evaluated.created) {
+            try {
+              const sent = await maybeSendOpportunityEmail({
+                store,
+                notifier,
+                userSub,
+                opportunity,
+              });
+              if (sent) {
+                result.emails += 1;
+              }
+            } catch {
+              if (result.errors.length < 5) {
+                result.errors.push(
+                  `Opportunity email failed for ${watch.title}.`,
+                );
+              }
+            }
+          }
+        } catch (error) {
+          if (result.errors.length < 5) {
+            result.errors.push(
+              `Opportunity check failed for ${watch.title}: ${error instanceof Error ? error.message.slice(0, 130) : "unknown error"}`,
+            );
+          }
+        }
+      }
     } catch (error) {
       result.failed += 1;
       if (result.errors.length < 5) {
@@ -142,7 +244,72 @@ export async function runMonitoringCycle(args: {
       }
     }
   }
-  return result;
+  let reminderOwners: string[] = [];
+  try {
+    reminderOwners = await store.listReminderOwners();
+  } catch (error) {
+    if (result.errors.length < 5) {
+      result.errors.push(
+        `Reminder scan failed: ${error instanceof Error ? error.message.slice(0, 150) : "unknown error"}`,
+      );
+    }
+  }
+  for (const userSub of reminderOwners) {
+    try {
+      if (!(await isProactive(userSub))) {
+        continue;
+      }
+      const fired = await fireDueReminders({ store, userSub, nowMs });
+      result.remindersFired += fired.fired.length;
+      result.opportunities += fired.opportunities.length;
+      for (const opportunity of fired.opportunities) {
+        try {
+          const sent = await maybeSendOpportunityEmail({
+            store,
+            notifier,
+            userSub,
+            opportunity,
+          });
+          if (sent) {
+            result.emails += 1;
+          }
+        } catch {
+          if (result.errors.length < 5) {
+            result.errors.push("Reminder email failed for one user.");
+          }
+        }
+      }
+      // Freeform reminders (no feed card) email directly when watch-bound.
+      for (const reminder of fired.fired) {
+        const hasCard = fired.opportunities.some(
+          (entry) => entry.dedupeKey === `reminder-due:${reminder.id}`,
+        );
+        if (hasCard || !reminder.watchId) {
+          continue;
+        }
+        try {
+          const sent = await maybeSendReminderEmail({
+            store,
+            notifier,
+            userSub,
+            reminder,
+          });
+          if (sent) {
+            result.emails += 1;
+          }
+        } catch {
+          if (result.errors.length < 5) {
+            result.errors.push("Reminder email failed for one user.");
+          }
+        }
+      }
+    } catch {
+      if (result.errors.length < 5) {
+        result.errors.push("Reminder firing failed for one user.");
+      }
+    }
+  }
+  return finish();
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -181,10 +348,18 @@ export function startMonitoring(): void {
       config,
     })
       .then((result) => {
-        if (result.checked > 0 || result.errors.length > 0) {
+        if (
+          result.checked > 0 ||
+          result.opportunities > 0 ||
+          result.errors.length > 0
+        ) {
           console.log(
             `[wisora] Price monitor: ${result.checked} checked, ` +
-              `${result.alerts} alerts (${result.failed} failed).`,
+              `${result.alerts} alerts, ` +
+              `${result.opportunities} opportunities, ` +
+              `${result.remindersFired} reminders, ` +
+              `${result.emails} emails ` +
+              `(${result.failed} failed).`,
           );
         }
       })

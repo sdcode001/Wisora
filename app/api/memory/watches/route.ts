@@ -8,6 +8,7 @@ import {
   FileMemoryStore,
   WatchlistFullError,
 } from "../../../../lib/memory/file-store";
+import { evaluateWatchForOpportunities } from "../../../../lib/opportunities/evaluate";
 import { evaluateObservationsForUser } from "../../../../lib/prices/check";
 import { summarizeHistory, targetRealismNote } from "../../../../lib/prices/history";
 import { notifierFromEnv } from "../../../../lib/prices/notify";
@@ -87,9 +88,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           notifier: notifierFromEnv(),
         })
       : [];
+    // A met target also files a feed card; failures here never fail the save.
+    let opportunities: unknown[] = [];
+    try {
+      opportunities = (
+        await evaluateWatchForOpportunities({
+          store,
+          userSub: user.sub,
+          watch,
+        })
+      ).created;
+    } catch {
+      opportunities = [];
+    }
     return NextResponse.json({
       watch,
       alert: created.find((entry) => entry.watchId === watch.id) ?? null,
+      opportunities,
       stats,
       realismWarning: targetRealismNote(watch.targetPrice, stats),
     });

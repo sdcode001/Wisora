@@ -39,6 +39,10 @@ function notifier(): Notifier & { calls: string[] } {
       calls.push(input.to);
       return { sent: true };
     },
+    async sendEmail(input: { to: string }) {
+      calls.push(input.to);
+      return { sent: true };
+    },
   };
 }
 
@@ -160,7 +164,7 @@ test("alerts without an address stay in-app with honest state", async () => {
     userSub: "user-1",
     watch,
     fetchPage: async () => PAGE_AT_39000,
-    notifier: { available: false, sendAlert },
+    notifier: { available: false, sendAlert, sendEmail: vi.fn() },
   });
   expect(outcome.alert?.email).toEqual({ attempted: false, sent: false });
   expect(sendAlert).not.toHaveBeenCalled();
@@ -177,6 +181,7 @@ test("email failures never fail the check", async () => {
     notifier: {
       available: true,
       sendAlert: async () => ({ sent: false, error: "quota exceeded" }),
+      sendEmail: async () => ({ sent: false, error: "quota exceeded" }),
     },
   });
   expect(outcome.status).toBe("ok");

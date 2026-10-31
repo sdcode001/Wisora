@@ -20,6 +20,14 @@ import {
   saveStoredWorkflow,
   workflowStorageKey,
 } from "../lib/workflow/persist";
+import {
+  clearHistory as clearStoredHistory,
+  historyStorageKey,
+  loadHistory,
+  removeHistoryEntry,
+  saveHistoryEntry,
+  type HistoryEntry,
+} from "../lib/workflow/history";
 
 const CATEGORIES: Array<{ id: Category; label: string }> = [
   { id: "electronics", label: "Electronics" },
@@ -28,13 +36,6 @@ const CATEGORIES: Array<{ id: Category; label: string }> = [
   { id: "beauty", label: "Beauty & Skincare" },
   { id: "home-kitchen", label: "Home & Kitchen" },
   { id: "general", label: "General" },
-];
-
-const EXAMPLES = [
-  "Find a laptop under ₹90,000 for .NET development.",
-  "Suggest comfortable running shoes under ₹5,000.",
-  "Compare smartphones with excellent battery life under ₹30,000.",
-  "Find skincare products suitable for a simple daily routine.",
 ];
 
 const STAGES = [
@@ -386,6 +387,118 @@ interface MonitorData {
   maxChecksPerCycle: number;
   tavilyConfigured: boolean;
   emailConfigured: boolean;
+  lastRun: MonitorRunData | null;
+}
+
+interface MonitorRunData {
+  startedAt: string;
+  finishedAt: string;
+  checked: number;
+  ok: number;
+  failed: number;
+  alerts: number;
+  opportunities: number;
+  remindersFired: number;
+  emails: number;
+}
+
+type OpportunityKind =
+  | "target-reached"
+  | "price-drop"
+  | "price-increase"
+  | "back-in-range"
+  | "restored"
+  | "unavailable"
+  | "reminder-due";
+
+type OpportunityStatus = "active" | "read" | "dismissed";
+
+interface OpportunityData {
+  id: string;
+  createdAt: string;
+  kind: OpportunityKind;
+  status: OpportunityStatus;
+  watchId?: string;
+  category?: Category;
+  relevance?: { score: number; reasons: string[] };
+  productId: string;
+  title: string;
+  merchant: string;
+  url: string;
+  imageUrl?: string;
+  currentPriceInr: number | null;
+  previousPriceInr: number | null;
+  targetPriceInr: number | null;
+  reason: string;
+  decisionContext?: string;
+  email?: { attempted: boolean; sent: boolean; error?: string };
+  evidence: {
+    source: "search" | "watch-check" | "reminder";
+    observedAt: string;
+    previousObservedAt?: string;
+  };
+}
+
+interface ReminderData {
+  id: string;
+  createdAt: string;
+  title: string;
+  url?: string;
+  merchant?: string;
+  productId?: string;
+  watchId?: string;
+  kind: "one-time";
+  remindAt: string;
+  timezone: string;
+  note?: string;
+  targetPriceInr?: number;
+  status: "active" | "done" | "disabled";
+  firedAt?: string;
+  firedBecause?: "time" | "target";
+}
+
+interface NotificationSettingsData {
+  proactiveEnabled: boolean;
+  priceEmails: boolean;
+  availabilityEmails: boolean;
+  reminderEmails: boolean;
+  updatedAt?: string;
+}
+
+type OppTab = "active" | "read" | "dismissed";
+
+interface ReminderDraft {
+  id: string | null;
+  title: string;
+  remindAtLocal: string;
+  timezone: string;
+  note: string;
+  targetPrice: string;
+  productId: string | null;
+  url: string | null;
+  merchant: string | null;
+  watchId: string | null;
+}
+
+interface ChatMessageData {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  createdAt: string;
+  sources?: Array<{ label: string; url?: string }>;
+}
+
+interface ChatThreadData {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  title: string;
+  messages: ChatMessageData[];
+}
+
+interface ChatProductHint {
+  productId: string;
+  title: string;
 }
 
 interface TrackDraft {
@@ -747,6 +860,82 @@ function formatSavedDate(iso: string): string {
   });
 }
 
+function formatRelative(iso: string, nowMs: number): string {
+  const ms = new Date(iso).getTime();
+  if (!Number.isFinite(ms)) {
+    return "unknown time";
+  }
+  const diffMs = nowMs - ms;
+  if (diffMs < 0) {
+    return "in the future";
+  }
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) {
+    return "just now";
+  }
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    return `${days}d ago`;
+  }
+  return formatSavedDate(iso);
+}
+
+function isStaleEvidence(iso: string, nowMs: number): boolean {
+  const ms = new Date(iso).getTime();
+  if (!Number.isFinite(ms)) {
+    return true;
+  }
+  return nowMs - ms > 7 * 24 * 60 * 60 * 1000;
+}
+
+const OPP_KIND_LABELS: Record<OpportunityKind, string> = {
+  "target-reached": "Target reached",
+  "price-drop": "Price drop",
+  "price-increase": "Price increase",
+  "back-in-range": "Back in range",
+  restored: "Back available",
+  unavailable: "Unavailable",
+  "reminder-due": "Reminder",
+};
+
+function oppKindChip(kind: OpportunityKind): string {
+  switch (kind) {
+    case "target-reached":
+    case "price-drop":
+    case "back-in-range":
+    case "restored":
+      return "border-teal-300/30 bg-teal-300/10 text-teal-200";
+    case "price-increase":
+    case "unavailable":
+      return "border-amber-300/30 bg-amber-300/10 text-amber-200";
+    case "reminder-due":
+      return "border-sky-300/30 bg-sky-300/10 text-sky-200";
+  }
+}
+
+function toLocalInputValue(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+}
+
+function browserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
 function generalToDraft(value: GeneralValue): GeneralDraft {
   return {
     currency: value.currency,
@@ -902,6 +1091,10 @@ export default function Home() {
   const [reviewsLoading, setReviewsLoading] = useState(false);
   const [reviewsError, setReviewsError] = useState<string | null>(null);
   const [restored, setRestored] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<
+    Array<HistoryEntry<PersistedWorkflow>>
+  >([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const router = useRouter();
@@ -919,6 +1112,7 @@ export default function Home() {
   const stagesRef = useRef<HTMLOListElement | null>(null);
   const verdictRef = useRef<HTMLElement | null>(null);
   const restoredSubRef = useRef<string | null>(null);
+  const historySigRef = useRef<string | null>(null);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [proposalsOpen, setProposalsOpen] = useState(false);
   const [profile, setProfile] = useState<ProfileData | null>(null);
@@ -970,6 +1164,38 @@ export default function Home() {
   const [editingWatchId, setEditingWatchId] = useState<string | null>(null);
   const [editTarget, setEditTarget] = useState("");
   const [insights, setInsights] = useState<Record<string, CardInsight>>({});
+  const [opportunities, setOpportunities] = useState<OpportunityData[]>([]);
+  const [oppTab, setOppTab] = useState<OppTab>("active");
+  const [oppCategory, setOppCategory] = useState<"" | Category>("");
+  const [oppLoading, setOppLoading] = useState(false);
+  const [oppError, setOppError] = useState<string | null>(null);
+  const [oppNotice, setOppNotice] = useState<string | null>(null);
+  const [activeOpps, setActiveOpps] = useState<OpportunityData[]>([]);
+  const [expandedOppId, setExpandedOppId] = useState<string | null>(null);
+  const [reevaluatingId, setReevaluatingId] = useState<string | null>(null);
+  const [oppsOpen, setOppsOpen] = useState(false);
+  const [widgetIndex, setWidgetIndex] = useState(0);
+  const [widgetPaused, setWidgetPaused] = useState(false);
+  const [remindersOpen, setRemindersOpen] = useState(false);
+  const [reminders, setReminders] = useState<ReminderData[]>([]);
+  const [remindersLoading, setRemindersLoading] = useState(false);
+  const [remindersError, setRemindersError] = useState<string | null>(null);
+  const [remindersNotice, setRemindersNotice] = useState<string | null>(null);
+  const [reminderDraft, setReminderDraft] = useState<ReminderDraft | null>(null);
+  const [savingReminder, setSavingReminder] = useState(false);
+  const [settings, setSettings] = useState<NotificationSettingsData | null>(null);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatThreads, setChatThreads] = useState<ChatThreadData[]>([]);
+  const [chatThread, setChatThread] = useState<ChatThreadData | null>(null);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatSending, setChatSending] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [chatInput, setChatInput] = useState("");
+  const [chatProduct, setChatProduct] = useState<ChatProductHint | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const nowMs = useMemo(() => Date.now(), []);
 
   useEffect(() => {
     return () => {
@@ -1064,7 +1290,36 @@ export default function Home() {
   }, [verdict, user]);
 
   useEffect(() => {
-    if (!prefsOpen && !proposalsOpen && !watchesOpen) {
+    if (chatThread) {
+      chatEndRef.current?.scrollIntoView({ block: "end" });
+    }
+  }, [chatThread, chatOpen]);
+
+  useEffect(() => {
+    if (activeOpps.length < 2 || widgetPaused) {
+      return;
+    }
+    if (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+    const id = setInterval(() => {
+      setWidgetIndex((index) => index + 1);
+    }, 5000);
+    return () => clearInterval(id);
+  }, [activeOpps.length, widgetPaused]);
+
+  useEffect(() => {
+    if (
+      !prefsOpen &&
+      !proposalsOpen &&
+      !watchesOpen &&
+      !remindersOpen &&
+      !chatOpen &&
+      !oppsOpen
+    ) {
       return;
     }
     const onKey = (event: KeyboardEvent) => {
@@ -1072,6 +1327,9 @@ export default function Home() {
         setPrefsOpen(false);
         setProposalsOpen(false);
         setWatchesOpen(false);
+        setRemindersOpen(false);
+        setChatOpen(false);
+        setOppsOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1081,7 +1339,7 @@ export default function Home() {
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = previousOverflow;
     };
-  }, [prefsOpen, proposalsOpen, watchesOpen]);
+  }, [prefsOpen, proposalsOpen, watchesOpen, remindersOpen, chatOpen, oppsOpen]);
 
   /* eslint-disable react-hooks/exhaustive-deps -- one-shot bootstrap when the
      signed-in user resolves; re-running on every render is not intended. */
@@ -1089,6 +1347,8 @@ export default function Home() {
     if (user) {
       void loadSummary();
       void loadAlerts();
+      void refreshActiveOpps();
+      void loadReminders();
     }
   }, [user]);
   /* eslint-enable react-hooks/exhaustive-deps */
@@ -1119,6 +1379,9 @@ export default function Home() {
     setPrefsOpen(false);
     setProposalsOpen(false);
     setWatchesOpen(false);
+    setRemindersOpen(false);
+    setChatOpen(false);
+    setOppsOpen(false);
     setProfile(null);
     setHasProfile(false);
     setProfileError(null);
@@ -1160,6 +1423,92 @@ export default function Home() {
     setEditingWatchId(null);
     setEditTarget("");
     setInsights({});
+    setOpportunities([]);
+    setOppTab("active");
+    setOppCategory("");
+    setOppError(null);
+    setOppNotice(null);
+    setActiveOpps([]);
+    setExpandedOppId(null);
+    setWidgetIndex(0);
+    setReminders([]);
+    setRemindersError(null);
+    setRemindersNotice(null);
+    setReminderDraft(null);
+    setSettings(null);
+    setSettingsNotice(null);
+    setChatThreads([]);
+    setChatThread(null);
+    setChatError(null);
+    setChatInput("");
+    setChatProduct(null);
+    setHistoryEntries([]);
+    setHistoryOpen(false);
+    historySigRef.current = null;
+  }
+
+  function restoreHistory(entry: HistoryEntry<PersistedWorkflow>): void {
+    historySigRef.current = null;
+    applyWorkflow(entry.snapshot);
+    setHistoryOpen(false);
+    requestAnimationFrame(() => {
+      scrollToElement(intentRef.current);
+    });
+  }
+
+  function deleteHistoryEntry(id: string): void {
+    if (!user) {
+      return;
+    }
+    setHistoryEntries(
+      removeHistoryEntry<PersistedWorkflow>(
+        window.localStorage,
+        historyStorageKey(user.sub),
+        id,
+      ),
+    );
+  }
+
+  function deleteAllHistory(): void {
+    if (!user) {
+      return;
+    }
+    clearStoredHistory(window.localStorage, historyStorageKey(user.sub));
+    setHistoryEntries([]);
+  }
+
+  function applyWorkflow(saved: PersistedWorkflow): void {
+    setQuery(saved.query ?? "");
+    setResult(saved.result);
+    setOverride(saved.override);
+    setDisabled(saved.disabled ?? {});
+    setReqs(saved.reqs);
+    setAnswers(saved.answers ?? {});
+    setReqsError(saved.reqsError);
+    if (saved.weights) {
+      setWeights(saved.weights);
+    }
+    setAllowOverBudget(saved.allowOverBudget ?? false);
+    setSearch(saved.search);
+    setVerdict(saved.verdict);
+    setReviews(saved.reviews);
+    setCompareIds(saved.compareIds ?? []);
+    setShowCompare(saved.showCompare ?? false);
+    setError(saved.error);
+    setSearchError(saved.searchError);
+    setVerdictError(saved.verdictError);
+    setStage(saved.verdict ? "done" : "idle");
+  }
+
+  function topPickTitle(verdictData: VerdictData | null): string | null {
+    const pickId = verdictData?.recommendation.productId;
+    if (!verdictData || !pickId) {
+      return null;
+    }
+    return (
+      verdictData.ranked.find((item) => item.product.id === pickId)?.product
+        .title ?? null
+    );
   }
 
   /* eslint-disable react-hooks/set-state-in-effect -- client-only restore
@@ -1185,27 +1534,14 @@ export default function Home() {
       workflowStorageKey(sub),
     );
     if (saved) {
-      setQuery(saved.query ?? "");
-      setResult(saved.result);
-      setOverride(saved.override);
-      setDisabled(saved.disabled ?? {});
-      setReqs(saved.reqs);
-      setAnswers(saved.answers ?? {});
-      setReqsError(saved.reqsError);
-      if (saved.weights) {
-        setWeights(saved.weights);
-      }
-      setAllowOverBudget(saved.allowOverBudget ?? false);
-      setSearch(saved.search);
-      setVerdict(saved.verdict);
-      setReviews(saved.reviews);
-      setCompareIds(saved.compareIds ?? []);
-      setShowCompare(saved.showCompare ?? false);
-      setError(saved.error);
-      setSearchError(saved.searchError);
-      setVerdictError(saved.verdictError);
-      setStage(saved.verdict ? "done" : "idle");
+      applyWorkflow(saved);
     }
+    setHistoryEntries(
+      loadHistory<PersistedWorkflow>(
+        window.localStorage,
+        historyStorageKey(sub),
+      ),
+    );
     setRestored(true);
   }, [user]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -1214,30 +1550,59 @@ export default function Home() {
     if (!restored || !user) {
       return;
     }
+    const draft: PersistedWorkflow = {
+      version: 1,
+      query,
+      result,
+      override,
+      disabled,
+      reqs,
+      answers,
+      weights,
+      allowOverBudget,
+      search,
+      verdict,
+      reviews,
+      compareIds,
+      showCompare,
+      error,
+      searchError,
+      verdictError,
+      reqsError,
+    };
     saveStoredWorkflow<PersistedWorkflow>(
       window.localStorage,
       workflowStorageKey(user.sub),
-      {
-        version: 1,
-        query,
-        result,
-        override,
-        disabled,
-        reqs,
-        answers,
-        weights,
-        allowOverBudget,
-        search,
-        verdict,
-        reviews,
-        compareIds,
-        showCompare,
-        error,
-        searchError,
-        verdictError,
-        reqsError,
-      },
+      draft,
     );
+    // History keeps completed searches only. The signature gates writes so
+    // typing in the query box does not rewrite the entry, while verdicts
+    // and late-arriving reviews still refresh it.
+    if (result && verdict) {
+      const signature = [
+        result.intent.query,
+        verdict.recommendation.verdict,
+        verdict.searchedAt,
+        search?.searchedAt ?? "",
+        reviews ? String(reviews.reports.length) : "none",
+      ].join("|");
+      if (signature !== historySigRef.current) {
+        historySigRef.current = signature;
+        setHistoryEntries(
+          saveHistoryEntry<PersistedWorkflow>(
+            window.localStorage,
+            historyStorageKey(user.sub),
+            {
+              query: result.intent.query,
+              verdict: verdict.recommendation.verdict,
+              topPick: topPickTitle(verdict),
+              snapshot: draft,
+            },
+            new Date().toISOString(),
+          ),
+        );
+      }
+    }
   }, [
     restored,
     user,
@@ -1327,6 +1692,21 @@ export default function Home() {
     setPurchasedId("");
     setFeedbackDone(false);
     setFeedbackError(null);
+  }
+
+  function clearResults(): void {
+    // Hide the previous analysis and everything below it; the query text
+    // stays so it can be edited and re-run.
+    setResult(null);
+    setOverride(null);
+    setDisabled({});
+    setReqs(null);
+    setAnswers({});
+    setReqsError(null);
+    setWeights({ ...DEFAULT_WEIGHT_STATE });
+    setAllowOverBudget(false);
+    setError(null);
+    clearDownstream();
   }
 
   async function analyze(text: string): Promise<void> {
@@ -1619,6 +1999,9 @@ export default function Home() {
     }
     setProposalsOpen(false);
     setWatchesOpen(false);
+    setRemindersOpen(false);
+    setChatOpen(false);
+    setOppsOpen(false);
     setPrefsOpen(true);
     setProfileNotice(null);
     setCatNotice(null);
@@ -1633,6 +2016,9 @@ export default function Home() {
     }
     setPrefsOpen(false);
     setWatchesOpen(false);
+    setRemindersOpen(false);
+    setChatOpen(false);
+    setOppsOpen(false);
     setProposalsOpen(true);
     setProposalsNotice(null);
     setProposalsError(null);
@@ -2162,12 +2548,47 @@ export default function Home() {
     }
     setPrefsOpen(false);
     setProposalsOpen(false);
+    setRemindersOpen(false);
+    setChatOpen(false);
+    setOppsOpen(false);
     setWatchesOpen(true);
     setWatchesNotice(null);
     setWatchesError(null);
     void loadWatches();
     void loadAlerts();
     void loadMonitor();
+    void loadSettings();
+  }
+
+  function openReminders(prefill?: Partial<ReminderDraft>): void {
+    if (remindersOpen && !prefill) {
+      setRemindersOpen(false);
+      return;
+    }
+    setPrefsOpen(false);
+    setProposalsOpen(false);
+    setWatchesOpen(false);
+    setChatOpen(false);
+    setOppsOpen(false);
+    setRemindersOpen(true);
+    setRemindersNotice(null);
+    setRemindersError(null);
+    if (prefill) {
+      setReminderDraft({
+        id: null,
+        title: "",
+        remindAtLocal: toLocalInputValue(new Date(Date.now() + 7 * 86400000)),
+        timezone: browserTimezone(),
+        note: "",
+        targetPrice: "",
+        productId: null,
+        url: null,
+        merchant: null,
+        watchId: null,
+        ...prefill,
+      });
+    }
+    void loadReminders();
   }
 
   async function loadWatches(): Promise<void> {
@@ -2219,9 +2640,497 @@ export default function Home() {
     }
   }
 
+  async function loadOpportunities(
+    status: OppTab,
+    category: "" | Category,
+  ): Promise<void> {
+    setOppLoading(true);
+    setOppError(null);
+    try {
+      const params = new URLSearchParams({ status, limit: "50" });
+      if (category) {
+        params.set("category", category);
+      }
+      const response = await fetch(`/api/opportunities?${params.toString()}`);
+      const data = (await response.json()) as {
+        opportunities?: OpportunityData[];
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not load opportunities.");
+      }
+      setOpportunities(data.opportunities ?? []);
+    } catch (e) {
+      setOppError(
+        e instanceof Error ? e.message : "Could not load opportunities.",
+      );
+    } finally {
+      setOppLoading(false);
+    }
+  }
+
+  async function refreshActiveOpps(): Promise<void> {
+    try {
+      const response = await fetch("/api/opportunities?status=active&limit=100");
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as {
+        opportunities?: OpportunityData[];
+      };
+      setActiveOpps(data.opportunities ?? []);
+    } catch {
+      // Widget quietly stays stale.
+    }
+  }
+
+  async function markOppRead(id: string): Promise<void> {
+    setOppError(null);
+    try {
+      const response = await fetch("/api/opportunities/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [id] }),
+      });
+      if (!response.ok) {
+        throw new Error("Could not mark as read.");
+      }
+      await loadOpportunities(oppTab, oppCategory);
+      await refreshActiveOpps();
+    } catch (e) {
+      setOppError(e instanceof Error ? e.message : "Could not mark as read.");
+    }
+  }
+
+  async function markAllOppRead(): Promise<void> {
+    setOppError(null);
+    try {
+      const response = await fetch("/api/opportunities/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: "all" }),
+      });
+      if (!response.ok) {
+        throw new Error("Could not mark all read.");
+      }
+      await loadOpportunities(oppTab, oppCategory);
+      await refreshActiveOpps();
+    } catch (e) {
+      setOppError(e instanceof Error ? e.message : "Could not mark all read.");
+    }
+  }
+
+  async function dismissOpp(id: string): Promise<void> {
+    setOppError(null);
+    try {
+      const response = await fetch("/api/opportunities/dismiss", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!response.ok) {
+        throw new Error("Could not dismiss.");
+      }
+      await loadOpportunities(oppTab, oppCategory);
+      await refreshActiveOpps();
+    } catch (e) {
+      setOppError(e instanceof Error ? e.message : "Could not dismiss.");
+    }
+  }
+
+  async function reevaluateOpp(id: string): Promise<void> {
+    if (reevaluatingId) {
+      return;
+    }
+    setReevaluatingId(id);
+    setOppError(null);
+    setOppNotice(null);
+    try {
+      const response = await fetch("/api/opportunities/re-evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const data = (await response.json()) as {
+        status?: string;
+        error?: string;
+        created?: unknown[];
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Re-evaluation failed.");
+      }
+      const created = data.created ?? [];
+      setOppNotice(
+        created.length > 0
+          ? `Fresh check complete — ${created.length} new opportunity${created.length === 1 ? "" : "s"}.`
+          : "Fresh check complete — no change worth a new card.",
+      );
+      await loadOpportunities(oppTab, oppCategory);
+      await refreshActiveOpps();
+    } catch (e) {
+      setOppError(e instanceof Error ? e.message : "Re-evaluation failed.");
+    } finally {
+      setReevaluatingId(null);
+    }
+  }
+
+  function remindAboutOpportunity(opp: OpportunityData): void {
+    openReminders({
+      title: opp.title,
+      note: "",
+      productId: opp.productId,
+      url: opp.url,
+      merchant: opp.merchant,
+      watchId: opp.watchId ?? null,
+      ...(opp.targetPriceInr != null
+        ? { targetPrice: String(opp.targetPriceInr) }
+        : {}),
+    });
+  }
+
+  async function loadReminders(): Promise<void> {
+    setRemindersLoading(true);
+    setRemindersError(null);
+    try {
+      const response = await fetch("/api/reminders");
+      const data = (await response.json()) as {
+        reminders?: ReminderData[];
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not load reminders.");
+      }
+      setReminders(data.reminders ?? []);
+    } catch (e) {
+      setRemindersError(
+        e instanceof Error ? e.message : "Could not load reminders.",
+      );
+    } finally {
+      setRemindersLoading(false);
+    }
+  }
+
+  function startReminderEdit(reminder: ReminderData): void {
+    const parsed = new Date(reminder.remindAt);
+    setRemindersError(null);
+    setReminderDraft({
+      id: reminder.id,
+      title: reminder.title,
+      remindAtLocal: Number.isFinite(parsed.getTime())
+        ? toLocalInputValue(parsed)
+        : "",
+      timezone: reminder.timezone,
+      note: reminder.note ?? "",
+      targetPrice:
+        reminder.targetPriceInr != null ? String(reminder.targetPriceInr) : "",
+      productId: reminder.productId ?? null,
+      url: reminder.url ?? null,
+      merchant: reminder.merchant ?? null,
+      watchId: reminder.watchId ?? null,
+    });
+  }
+
+  async function saveReminderDraft(): Promise<void> {
+    if (!reminderDraft || savingReminder) {
+      return;
+    }
+    const title = reminderDraft.title.trim();
+    if (!title) {
+      setRemindersError("Give the reminder a title.");
+      return;
+    }
+    const remindAt = new Date(reminderDraft.remindAtLocal);
+    if (!Number.isFinite(remindAt.getTime())) {
+      setRemindersError("Pick a valid date and time.");
+      return;
+    }
+    let targetPriceInr: number | null = null;
+    if (reminderDraft.targetPrice.trim()) {
+      const parsed = Number(reminderDraft.targetPrice.trim());
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        setRemindersError("Target price must be above ₹0.");
+        return;
+      }
+      targetPriceInr = parsed;
+    }
+    setSavingReminder(true);
+    setRemindersError(null);
+    setRemindersNotice(null);
+    try {
+      if (reminderDraft.id) {
+        const response = await fetch("/api/reminders", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: reminderDraft.id,
+            title,
+            remindAt: remindAt.toISOString(),
+            timezone: reminderDraft.timezone.trim() || "UTC",
+            note: reminderDraft.note.trim() || null,
+            targetPriceInr,
+          }),
+        });
+        const data = (await response.json()) as { error?: string };
+        if (!response.ok) {
+          throw new Error(data.error ?? "Could not update the reminder.");
+        }
+        setRemindersNotice("Reminder updated.");
+      } else {
+        const response = await fetch("/api/reminders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title,
+            remindAt: remindAt.toISOString(),
+            timezone: reminderDraft.timezone.trim() || "UTC",
+            ...(reminderDraft.note.trim()
+              ? { note: reminderDraft.note.trim() }
+              : {}),
+            ...(targetPriceInr != null ? { targetPriceInr } : {}),
+            ...(reminderDraft.productId
+              ? { productId: reminderDraft.productId }
+              : {}),
+            ...(reminderDraft.url ? { url: reminderDraft.url } : {}),
+            ...(reminderDraft.merchant
+              ? { merchant: reminderDraft.merchant }
+              : {}),
+            ...(reminderDraft.watchId ? { watchId: reminderDraft.watchId } : {}),
+          }),
+        });
+        const data = (await response.json()) as { error?: string };
+        if (!response.ok) {
+          throw new Error(data.error ?? "Could not save the reminder.");
+        }
+        setRemindersNotice("Reminder saved.");
+      }
+      setReminderDraft(null);
+      await loadReminders();
+    } catch (e) {
+      setRemindersError(
+        e instanceof Error ? e.message : "Could not save the reminder.",
+      );
+    } finally {
+      setSavingReminder(false);
+    }
+  }
+
+  async function deleteReminderById(id: string): Promise<void> {
+    setRemindersError(null);
+    try {
+      const response = await fetch(
+        `/api/reminders?id=${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        throw new Error("Could not delete the reminder.");
+      }
+      if (reminderDraft?.id === id) {
+        setReminderDraft(null);
+      }
+      await loadReminders();
+    } catch (e) {
+      setRemindersError(
+        e instanceof Error ? e.message : "Could not delete the reminder.",
+      );
+    }
+  }
+
+  async function setReminderStatus(
+    id: string,
+    status: "active" | "disabled",
+  ): Promise<void> {
+    setRemindersError(null);
+    try {
+      const response = await fetch("/api/reminders", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, status }),
+      });
+      if (!response.ok) {
+        throw new Error("Could not update the reminder.");
+      }
+      await loadReminders();
+    } catch (e) {
+      setRemindersError(
+        e instanceof Error ? e.message : "Could not update the reminder.",
+      );
+    }
+  }
+
+  async function loadSettings(): Promise<void> {
+    try {
+      const response = await fetch("/api/settings/notifications");
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as {
+        settings: NotificationSettingsData;
+      };
+      setSettings(data.settings);
+    } catch {
+      // Settings stay unavailable.
+    }
+  }
+
+  async function saveSettings(
+    patch: Partial<NotificationSettingsData>,
+  ): Promise<void> {
+    if (settingsSaving) {
+      return;
+    }
+    setSettingsSaving(true);
+    setSettingsNotice(null);
+    try {
+      const response = await fetch("/api/settings/notifications", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = (await response.json()) as {
+        settings?: NotificationSettingsData;
+        error?: string;
+      };
+      if (!response.ok || !data.settings) {
+        throw new Error(data.error ?? "Could not save settings.");
+      }
+      setSettings(data.settings);
+      setSettingsNotice("Notification settings saved.");
+    } catch (e) {
+      setSettingsNotice(
+        e instanceof Error ? e.message : "Could not save settings.",
+      );
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
+  function openOpps(): void {
+    if (oppsOpen) {
+      setOppsOpen(false);
+      return;
+    }
+    setPrefsOpen(false);
+    setProposalsOpen(false);
+    setWatchesOpen(false);
+    setRemindersOpen(false);
+    setChatOpen(false);
+    setOppsOpen(true);
+    setOppNotice(null);
+    setOppError(null);
+    void loadOpportunities(oppTab, oppCategory);
+    void refreshActiveOpps();
+  }
+
+  function openChat(prefill?: {
+    input: string;
+    product: ChatProductHint | null;
+  }): void {
+    if (chatOpen && !prefill) {
+      setChatOpen(false);
+      return;
+    }
+    setPrefsOpen(false);
+    setProposalsOpen(false);
+    setWatchesOpen(false);
+    setRemindersOpen(false);
+    setOppsOpen(false);
+    setChatOpen(true);
+    setChatError(null);
+    if (prefill) {
+      setChatThread(null);
+      setChatInput(prefill.input);
+      setChatProduct(prefill.product);
+    }
+    void loadChatThreads();
+  }
+
+  function askAboutOpportunity(opp: OpportunityData): void {
+    openChat({
+      input: `Is ${opp.title} still a good deal?`,
+      product: { productId: opp.productId, title: opp.title },
+    });
+  }
+
+  async function loadChatThreads(): Promise<void> {
+    setChatLoading(true);
+    try {
+      const response = await fetch("/api/chat/threads");
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as { threads: ChatThreadData[] };
+      setChatThreads(data.threads ?? []);
+    } catch {
+      // Thread list quietly stays stale.
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
+  async function sendChat(): Promise<void> {
+    const message = chatInput.trim();
+    if (!message || chatSending) {
+      return;
+    }
+    setChatSending(true);
+    setChatError(null);
+    setChatInput("");
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          ...(chatThread ? { threadId: chatThread.id } : {}),
+          ...(chatProduct ? { productId: chatProduct.productId } : {}),
+        }),
+      });
+      const data = (await response.json()) as {
+        thread?: ChatThreadData;
+        error?: string;
+      };
+      if (!response.ok || !data.thread) {
+        throw new Error(data.error ?? "Could not send your message.");
+      }
+      setChatThread(data.thread);
+      setChatThreads((prev) => {
+        const rest = prev.filter((entry) => entry.id !== data.thread?.id);
+        return data.thread ? [data.thread, ...rest] : rest;
+      });
+    } catch (e) {
+      setChatError(e instanceof Error ? e.message : "Could not send.");
+      setChatInput(message);
+    } finally {
+      setChatSending(false);
+    }
+  }
+
+  async function deleteChatThreadById(id: string): Promise<void> {
+    try {
+      const response = await fetch(
+        `/api/chat/threads?id=${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        throw new Error("Could not delete the conversation.");
+      }
+      setChatThreads((prev) => prev.filter((entry) => entry.id !== id));
+      if (chatThread?.id === id) {
+        setChatThread(null);
+      }
+    } catch (e) {
+      setChatError(
+        e instanceof Error ? e.message : "Could not delete the conversation.",
+      );
+    }
+  }
+
   function startTrack(product: Product): void {
     setPrefsOpen(false);
     setProposalsOpen(false);
+    setRemindersOpen(false);
+    setChatOpen(false);
+    setOppsOpen(false);
     setWatchesOpen(true);
     setWatchesNotice(null);
     setWatchesError(null);
@@ -2238,6 +3147,7 @@ export default function Home() {
     void loadWatches();
     void loadAlerts();
     void loadMonitor();
+    void loadSettings();
   }
 
   async function createWatch(): Promise<void> {
@@ -2731,6 +3641,11 @@ export default function Home() {
     );
   }
 
+  const activeReminderCount = reminders.filter(
+    (entry) => entry.status === "active",
+  ).length;
+  const drawerOnLeft = remindersOpen || chatOpen || oppsOpen;
+
   return (
     <main className="relative mx-auto min-h-screen max-w-3xl px-4 py-10 text-stone-200 sm:px-6">
       <div
@@ -2794,8 +3709,90 @@ export default function Home() {
           never guesses.
         </p>
       </header>
+      {user &&
+        activeOpps.length > 0 &&
+        !oppsOpen &&
+        (() => {
+          const position =
+            ((widgetIndex % activeOpps.length) + activeOpps.length) %
+            activeOpps.length;
+          const current = activeOpps[position];
+          if (!current) {
+            return null;
+          }
+          const step = (delta: number) => (event: React.SyntheticEvent) => {
+            event.stopPropagation();
+            setWidgetIndex((index) => index + delta);
+          };
+          return (
+            <div
+              role="button"
+              tabIndex={0}
+              aria-label={`${activeOpps.length} active opportunit${activeOpps.length === 1 ? "y" : "ies"}. Open alerts list.`}
+              onClick={() => openOpps()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  openOpps();
+                }
+              }}
+              onMouseEnter={() => setWidgetPaused(true)}
+              onMouseLeave={() => setWidgetPaused(false)}
+              onFocus={() => setWidgetPaused(true)}
+              onBlur={() => setWidgetPaused(false)}
+              className="fixed top-3 left-0 z-30 w-52 cursor-pointer rounded-r-xl border border-l-0 border-white/15 bg-stone-950/85 p-2 shadow-lg backdrop-blur-xl transition hover:border-teal-300/50 sm:top-4"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold tracking-wide text-teal-300 uppercase">
+                  Alerts
+                </span>
+                <span className="ml-auto text-[11px] text-stone-500">
+                  {position + 1}/{activeOpps.length}
+                </span>
+                {activeOpps.length > 1 && (
+                  <span className="flex gap-0.5">
+                    <button
+                      type="button"
+                      aria-label="Previous alert"
+                      onClick={step(-1)}
+                      className="rounded px-1 text-xs text-stone-500 hover:text-stone-200"
+                    >
+                      ‹
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Next alert"
+                      onClick={step(1)}
+                      className="rounded px-1 text-xs text-stone-500 hover:text-stone-200"
+                    >
+                      ›
+                    </button>
+                  </span>
+                )}
+              </div>
+              <p
+                title={current.title}
+                className="mt-1 truncate text-xs font-medium text-stone-100"
+              >
+                {current.title}
+              </p>
+              <p className="mt-0.5 flex items-center gap-1.5 text-xs">
+                <span
+                  className={`rounded-full border px-1.5 py-px text-[10px] font-semibold ${oppKindChip(current.kind)}`}
+                >
+                  {OPP_KIND_LABELS[current.kind]}
+                </span>
+                {current.currentPriceInr != null && (
+                  <span className="font-semibold text-stone-200">
+                    {formatInr(current.currentPriceInr)}
+                  </span>
+                )}
+              </p>
+            </div>
+          );
+        })()}
       {user && (
-        <div className="fixed top-1/2 right-0 z-50 flex -translate-y-1/2 flex-col gap-2">
+        <div className="fixed top-1/2 right-0 z-50 flex max-h-[calc(100dvh-5rem)] -translate-y-1/2 flex-col gap-2 overflow-y-auto overscroll-contain py-1">
           <button
             type="button"
             onClick={openPrefs}
@@ -2851,8 +3848,74 @@ export default function Home() {
           </button>
         </div>
       )}
+      {user && (
+        <div className="fixed top-1/2 left-0 z-50 flex max-h-[calc(100dvh-5rem)] -translate-y-1/2 flex-col gap-2 overflow-y-auto overscroll-contain py-1">
+          <button
+            type="button"
+            onClick={() => openOpps()}
+            aria-expanded={oppsOpen}
+            aria-label={
+              activeOpps.length > 0
+                ? `Opportunities, ${activeOpps.length} active`
+                : "Opportunities"
+            }
+            className={
+              oppsOpen
+                ? "rounded-r-lg border border-l-0 border-teal-300/50 bg-teal-300/10 px-3 py-6 shadow-lg backdrop-blur-xl"
+                : "rounded-r-lg border border-l-0 border-white/15 bg-stone-950/90 px-3 py-6 shadow-lg backdrop-blur-xl transition hover:border-teal-300/50"
+            }
+          >
+            <span className="[writing-mode:vertical-rl] rotate-180 text-sm font-semibold tracking-wide text-stone-200">
+              {activeOpps.length > 0
+                ? `Alerts (${activeOpps.length})`
+                : "Alerts"}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => openReminders()}
+            aria-expanded={remindersOpen}
+            aria-label={
+              activeReminderCount > 0
+                ? `Reminders, ${activeReminderCount} active`
+                : "Reminders"
+            }
+            className={
+              remindersOpen
+                ? "rounded-r-lg border border-l-0 border-teal-300/50 bg-teal-300/10 px-3 py-6 shadow-lg backdrop-blur-xl"
+                : "rounded-r-lg border border-l-0 border-white/15 bg-stone-950/90 px-3 py-6 shadow-lg backdrop-blur-xl transition hover:border-teal-300/50"
+            }
+          >
+            <span className="[writing-mode:vertical-rl] rotate-180 text-sm font-semibold tracking-wide text-stone-200">
+              {activeReminderCount > 0
+                ? `Reminders (${activeReminderCount})`
+                : "Reminders"}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => openChat()}
+            aria-expanded={chatOpen}
+            aria-label="Chat with Wisora"
+            className={
+              chatOpen
+                ? "rounded-r-lg border border-l-0 border-teal-300/50 bg-teal-300/10 px-3 py-6 shadow-lg backdrop-blur-xl"
+                : "rounded-r-lg border border-l-0 border-white/15 bg-stone-950/90 px-3 py-6 shadow-lg backdrop-blur-xl transition hover:border-teal-300/50"
+            }
+          >
+            <span className="[writing-mode:vertical-rl] rotate-180 text-sm font-semibold tracking-wide text-stone-200">
+              Chat
+            </span>
+          </button>
+        </div>
+      )}
 
-      {(prefsOpen || proposalsOpen || watchesOpen) && (
+      {(prefsOpen ||
+        proposalsOpen ||
+        watchesOpen ||
+        remindersOpen ||
+        chatOpen ||
+        oppsOpen) && (
         <button
           type="button"
           aria-label="Close panel"
@@ -2860,18 +3923,40 @@ export default function Home() {
             setPrefsOpen(false);
             setProposalsOpen(false);
             setWatchesOpen(false);
+            setRemindersOpen(false);
+            setChatOpen(false);
+            setOppsOpen(false);
           }}
           className="fixed inset-0 z-40 h-full w-full cursor-default bg-black/60"
         />
       )}
-      {(prefsOpen || proposalsOpen || watchesOpen) && (
+      {(prefsOpen ||
+        proposalsOpen ||
+        watchesOpen ||
+        remindersOpen ||
+        chatOpen ||
+        oppsOpen) && (
         <section
           aria-label={
-            prefsOpen ? "Preferences" : proposalsOpen ? "Suggestions" : "Watchlist"
+            prefsOpen
+              ? "Preferences"
+              : proposalsOpen
+                ? "Suggestions"
+                : watchesOpen
+                  ? "Watchlist"
+                  : remindersOpen
+                    ? "Reminders"
+                    : oppsOpen
+                      ? "Opportunities"
+                      : "Chat"
           }
           role="dialog"
           aria-modal="true"
-          className="fixed top-0 right-0 z-40 h-full w-full max-w-lg overflow-y-auto border-l border-white/10 bg-stone-950/95 p-5 pr-12 shadow-2xl backdrop-blur-xl motion-safe:animate-[drawer-in_0.25s_ease-out]"
+          className={
+            drawerOnLeft
+              ? "fixed top-0 left-0 z-40 h-full w-full max-w-lg overflow-y-auto border-r border-white/10 bg-stone-950/95 p-5 pl-12 shadow-2xl backdrop-blur-xl motion-safe:animate-[drawer-in-left_0.25s_ease-out]"
+              : "fixed top-0 right-0 z-40 h-full w-full max-w-lg overflow-y-auto border-l border-white/10 bg-stone-950/95 p-5 pr-12 shadow-2xl backdrop-blur-xl motion-safe:animate-[drawer-in_0.25s_ease-out]"
+          }
         >
           {prefsOpen ? (
             <div>
@@ -3329,7 +4414,7 @@ export default function Home() {
                 <p className="mt-3 text-xs text-teal-200">{proposalsNotice}</p>
               )}
             </div>
-          ) : (
+          ) : watchesOpen ? (
             <div>
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -3349,6 +4434,17 @@ export default function Home() {
                       {monitor.emailConfigured
                         ? "email alerts on"
                         : "email alerts off"}
+                    </p>
+                  )}
+                  {monitor?.lastRun && (
+                    <p className="mt-1 text-xs text-stone-500">
+                      Last check {formatRelative(monitor.lastRun.finishedAt, nowMs)} ·{" "}
+                      {monitor.lastRun.checked} checked ·{" "}
+                      {monitor.lastRun.opportunities} opportunit
+                      {monitor.lastRun.opportunities === 1 ? "y" : "ies"} ·{" "}
+                      {monitor.lastRun.remindersFired} reminder
+                      {monitor.lastRun.remindersFired === 1 ? "" : "s"} fired ·{" "}
+                      {monitor.lastRun.emails} emailed
                     </p>
                   )}
                 </div>
@@ -3623,6 +4719,838 @@ export default function Home() {
                   </ul>
                 )}
               </div>
+              <div className="mt-6">
+                <h3 className="text-sm font-semibold text-stone-200">
+                  Notifications
+                </h3>
+                <p className="mt-1 text-xs text-stone-500">
+                  Control proactive cards and alert emails. Changes apply to
+                  new events.
+                </p>
+                {settings ? (
+                  <div className="mt-2 space-y-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-300">
+                      <input
+                        type="checkbox"
+                        checked={settings.proactiveEnabled}
+                        disabled={settingsSaving}
+                        onChange={(event) =>
+                          void saveSettings({
+                            proactiveEnabled: event.target.checked,
+                          })
+                        }
+                        className="h-4 w-4 accent-teal-300"
+                      />
+                      Proactive opportunities
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-300">
+                      <input
+                        type="checkbox"
+                        checked={settings.priceEmails}
+                        disabled={settingsSaving}
+                        onChange={(event) =>
+                          void saveSettings({
+                            priceEmails: event.target.checked,
+                          })
+                        }
+                        className="h-4 w-4 accent-teal-300"
+                      />
+                      Price alert emails
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-300">
+                      <input
+                        type="checkbox"
+                        checked={settings.availabilityEmails}
+                        disabled={settingsSaving}
+                        onChange={(event) =>
+                          void saveSettings({
+                            availabilityEmails: event.target.checked,
+                          })
+                        }
+                        className="h-4 w-4 accent-teal-300"
+                      />
+                      Availability emails
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-300">
+                      <input
+                        type="checkbox"
+                        checked={settings.reminderEmails}
+                        disabled={settingsSaving}
+                        onChange={(event) =>
+                          void saveSettings({
+                            reminderEmails: event.target.checked,
+                          })
+                        }
+                        className="h-4 w-4 accent-teal-300"
+                      />
+                      Reminder emails
+                    </label>
+                    <p className="text-xs text-stone-400">
+                      Every trigger sends an email while its type stays on.
+                    </p>
+                    {settingsNotice && (
+                      <p className="text-xs text-teal-300">{settingsNotice}</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-stone-500">Loading…</p>
+                )}
+              </div>
+            </div>
+          ) : remindersOpen ? (
+            <div>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-stone-100">
+                    Reminders
+                  </h2>
+                  <p className="mt-1 text-xs text-stone-500">
+                    One-time nudges to revisit a decision. A reminder never
+                    predicts a price — it just brings you back.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRemindersOpen(false)}
+                  className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                >
+                  Close
+                </button>
+              </div>
+              {remindersNotice && (
+                <p className="mt-3 text-sm text-teal-300">{remindersNotice}</p>
+              )}
+              {remindersError && (
+                <p className="mt-3 rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-200">
+                  {remindersError}
+                </p>
+              )}
+              {!reminderDraft && (
+                <button
+                  type="button"
+                  onClick={() => openReminders({})}
+                  className="mt-3 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-stone-200 transition hover:border-teal-300/40 hover:text-teal-200"
+                >
+                  + New reminder
+                </button>
+              )}
+              {reminderDraft && (
+                <div className="mt-3 space-y-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                  <p className="text-xs font-semibold text-stone-300">
+                    {reminderDraft.id ? "Edit reminder" : "New reminder"}
+                  </p>
+                  {reminderDraft.merchant && (
+                    <p className="truncate text-xs text-stone-500">
+                      {reminderDraft.merchant}
+                      {reminderDraft.url ? " · linked product" : ""}
+                    </p>
+                  )}
+                  <label className="block text-xs text-stone-400">
+                    Title
+                    <input
+                      type="text"
+                      value={reminderDraft.title}
+                      onChange={(event) =>
+                        setReminderDraft((prev) =>
+                          prev
+                            ? { ...prev, title: event.target.value }
+                            : prev,
+                        )
+                      }
+                      placeholder="e.g. Revisit the laptop shortlist"
+                      className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    <label className="block flex-1 text-xs text-stone-400">
+                      Date &amp; time
+                      <input
+                        type="datetime-local"
+                        value={reminderDraft.remindAtLocal}
+                        onChange={(event) =>
+                          setReminderDraft((prev) =>
+                            prev
+                              ? { ...prev, remindAtLocal: event.target.value }
+                              : prev,
+                          )
+                        }
+                        className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2 text-sm text-stone-100 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                      />
+                    </label>
+                    <label className="block w-36 text-xs text-stone-400">
+                      Timezone
+                      <input
+                        type="text"
+                        value={reminderDraft.timezone}
+                        onChange={(event) =>
+                          setReminderDraft((prev) =>
+                            prev
+                              ? { ...prev, timezone: event.target.value }
+                              : prev,
+                          )
+                        }
+                        placeholder="Asia/Kolkata"
+                        className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+                  <label className="block text-xs text-stone-400">
+                    Note (optional)
+                    <input
+                      type="text"
+                      value={reminderDraft.note}
+                      onChange={(event) =>
+                        setReminderDraft((prev) =>
+                          prev ? { ...prev, note: event.target.value } : prev,
+                        )
+                      }
+                      placeholder="Why revisit?"
+                      className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 p-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                    />
+                  </label>
+                  <label className="block text-xs text-stone-400">
+                    Also fire at or below ₹ (optional)
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={reminderDraft.targetPrice}
+                      onChange={(event) =>
+                        setReminderDraft((prev) =>
+                          prev
+                            ? { ...prev, targetPrice: event.target.value }
+                            : prev,
+                        )
+                      }
+                      placeholder="e.g. 65000"
+                      className="mt-1 w-32 rounded-lg border border-white/10 bg-white/5 p-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void saveReminderDraft()}
+                      disabled={savingReminder}
+                      className="rounded-lg bg-white px-4 py-1.5 text-xs font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {savingReminder
+                        ? "Saving…"
+                        : reminderDraft.id
+                          ? "Save changes"
+                          : "Save reminder"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReminderDraft(null)}
+                      className="rounded-lg border border-white/15 bg-white/5 px-4 py-1.5 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="mt-4">
+                <h3 className="text-sm font-semibold text-stone-200">
+                  Upcoming
+                </h3>
+                {remindersLoading ? (
+                  <p className="mt-2 text-xs text-stone-500">Loading…</p>
+                ) : (
+                  (() => {
+                    const upcoming = reminders
+                      .filter((entry) => entry.status !== "done")
+                      .sort((a, b) =>
+                        a.remindAt < b.remindAt
+                          ? -1
+                          : a.remindAt > b.remindAt
+                            ? 1
+                            : 0,
+                      );
+                    if (upcoming.length === 0) {
+                      return (
+                        <p className="mt-2 text-xs text-stone-500">
+                          No upcoming reminders. Create one above, or tap
+                          “Remind me” on any opportunity.
+                        </p>
+                      );
+                    }
+                    return (
+                      <ul className="mt-2 space-y-2">
+                        {upcoming.map((entry) => (
+                          <li
+                            key={entry.id}
+                            className="rounded-xl border border-white/10 bg-white/[0.02] p-3"
+                          >
+                            <p className="text-sm font-medium text-stone-100">
+                              {entry.title}
+                            </p>
+                            <p className="mt-0.5 text-xs text-stone-500">
+                              {formatSavedDate(entry.remindAt)}
+                              {entry.targetPriceInr != null
+                                ? ` · fires at ${formatInr(entry.targetPriceInr)} or below`
+                                : ""}
+                              {entry.status === "disabled" ? " · paused" : ""}
+                            </p>
+                            {entry.note && (
+                              <p className="mt-0.5 text-xs text-stone-400">
+                                {entry.note}
+                              </p>
+                            )}
+                            <div className="mt-1.5 flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() => startReminderEdit(entry)}
+                                className="text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void setReminderStatus(
+                                    entry.id,
+                                    entry.status === "disabled"
+                                      ? "active"
+                                      : "disabled",
+                                  )
+                                }
+                                className="text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                              >
+                                {entry.status === "disabled"
+                                  ? "Resume"
+                                  : "Pause"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void deleteReminderById(entry.id)}
+                                className="text-xs text-stone-500 hover:text-rose-300 hover:underline"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    );
+                  })()
+                )}
+              </div>
+              {reminders.some((entry) => entry.status === "done") && (
+                <div className="mt-4">
+                  <h3 className="text-sm font-semibold text-stone-200">
+                    Completed
+                  </h3>
+                  <ul className="mt-2 space-y-2">
+                    {reminders
+                      .filter((entry) => entry.status === "done")
+                      .map((entry) => (
+                        <li
+                          key={entry.id}
+                          className="rounded-xl border border-white/10 bg-white/[0.02] p-3 opacity-70"
+                        >
+                          <p className="text-sm text-stone-300">
+                            {entry.title}
+                          </p>
+                          <p className="mt-0.5 text-xs text-stone-500">
+                            Fired{" "}
+                            {entry.firedAt
+                              ? formatRelative(entry.firedAt, nowMs)
+                              : ""}
+                            {entry.firedBecause === "target"
+                              ? " · target met"
+                              : ""}
+                          </p>
+                          <div className="mt-1.5 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void setReminderStatus(entry.id, "active")
+                              }
+                              className="text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                            >
+                              Re-activate
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void deleteReminderById(entry.id)}
+                              className="text-xs text-stone-500 hover:text-rose-300 hover:underline"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : oppsOpen ? (
+            <div>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-stone-100">
+                    Opportunities for you
+                  </h2>
+                  <p className="mt-1 text-xs text-stone-500">
+                    Target hits, price moves, and restocks on tracked
+                    products.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOppsOpen(false)}
+                  className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                >
+                  Close
+                </button>
+              </div>
+              <div
+                className="mt-3 flex items-center gap-1"
+                role="group"
+                aria-label="Opportunity status"
+              >
+                {(["active", "read", "dismissed"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => {
+                      setOppTab(tab);
+                      void loadOpportunities(tab, oppCategory);
+                    }}
+                    aria-pressed={oppTab === tab}
+                    className={
+                      oppTab === tab
+                        ? "rounded-full border border-teal-300/60 bg-teal-300/15 px-3 py-1 text-xs font-semibold text-teal-200 capitalize"
+                        : "rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs text-stone-400 capitalize transition hover:border-teal-300/40 hover:text-teal-200"
+                    }
+                  >
+                    {tab === "active" && activeOpps.length > 0
+                      ? `Active (${activeOpps.length})`
+                      : tab}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <label className="text-xs text-stone-500">
+                  Category{" "}
+                  <select
+                    value={oppCategory}
+                    onChange={(event) => {
+                      const next = event.target.value as "" | Category;
+                      setOppCategory(next);
+                      void loadOpportunities(oppTab, next);
+                    }}
+                    className="ml-1 rounded-lg border border-white/10 bg-stone-950 p-1.5 text-xs text-stone-200 focus:border-teal-300/60 focus:outline-none"
+                  >
+                    <option value="">All</option>
+                    {CATEGORIES.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {oppTab === "active" && opportunities.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void markAllOppRead()}
+                    className="ml-auto text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                  >
+                    Mark all read
+                  </button>
+                )}
+              </div>
+              {oppNotice && (
+                <p className="mt-3 text-sm text-teal-300">{oppNotice}</p>
+              )}
+              {oppError && (
+                <p className="mt-3 rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-200">
+                  {oppError}{" "}
+                  <button
+                    type="button"
+                    onClick={() => void loadOpportunities(oppTab, oppCategory)}
+                    className="underline hover:text-red-100"
+                  >
+                    Retry
+                  </button>
+                </p>
+              )}
+              {oppLoading ? (
+                <p className="mt-3 text-sm text-stone-500">Loading…</p>
+              ) : opportunities.length === 0 ? (
+                <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.02] p-4">
+                  <p className="text-sm text-stone-300">
+                    {oppTab === "active"
+                      ? "No opportunities right now."
+                      : oppTab === "read"
+                        ? "Nothing marked read yet."
+                        : "Nothing dismissed."}
+                  </p>
+                  {oppTab === "active" && (
+                    <p className="mt-1 text-xs text-stone-500">
+                      Track products from the Watchlist and Wisora will flag
+                      target hits, big price moves, and restocks here.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <ul className="mt-3 space-y-3">
+                  {opportunities.map((opp) => {
+                    const stale = isStaleEvidence(
+                      opp.evidence.observedAt,
+                      nowMs,
+                    );
+                    const expanded = expandedOppId === opp.id;
+                    return (
+                      <li
+                        key={opp.id}
+                        className="rounded-xl border border-white/10 bg-white/[0.02] p-4"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${oppKindChip(opp.kind)}`}
+                          >
+                            {OPP_KIND_LABELS[opp.kind]}
+                          </span>
+                          {opp.category && (
+                            <span className="text-xs text-stone-500">
+                              {categoryLabel(opp.category)}
+                            </span>
+                          )}
+                          <span className="ml-auto text-xs text-stone-500">
+                            {formatRelative(opp.evidence.observedAt, nowMs)}
+                          </span>
+                        </div>
+                        <a
+                          href={opp.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={opp.title}
+                          className="mt-1.5 block truncate font-medium text-stone-50 hover:text-teal-200 hover:underline"
+                        >
+                          {opp.title}
+                        </a>
+                        <p className="text-xs text-stone-500">{opp.merchant}</p>
+                        {(opp.currentPriceInr != null ||
+                          opp.targetPriceInr != null) && (
+                          <p className="mt-1 text-sm text-stone-200">
+                            {opp.currentPriceInr != null && (
+                              <span className="font-semibold">
+                                {formatInr(opp.currentPriceInr)}
+                              </span>
+                            )}
+                            {opp.previousPriceInr != null && (
+                              <span className="ml-2 text-xs text-stone-500 line-through">
+                                {formatInr(opp.previousPriceInr)}
+                              </span>
+                            )}
+                            {opp.targetPriceInr != null && (
+                              <span className="ml-2 text-xs text-stone-400">
+                                target {formatInr(opp.targetPriceInr)}
+                              </span>
+                            )}
+                          </p>
+                        )}
+                        <p className="mt-1 text-sm leading-relaxed text-stone-300">
+                          {opp.reason}
+                        </p>
+                        {opp.decisionContext && (
+                          <p className="mt-1 text-xs text-stone-400">
+                            {opp.decisionContext} Re-check to see if it still
+                            holds.
+                          </p>
+                        )}
+                        {opp.email?.sent && (
+                          <p className="mt-0.5 text-xs text-stone-500">
+                            Emailed ✓
+                          </p>
+                        )}
+                        {opp.email?.attempted && !opp.email.sent && (
+                          <p className="mt-0.5 text-xs text-stone-500">
+                            Email failed
+                            {opp.email.error ? `: ${opp.email.error}` : ""}
+                          </p>
+                        )}
+                        {stale && (
+                          <p className="mt-1 text-xs text-amber-200/80">
+                            Evidence is over a week old — re-check before
+                            acting.
+                          </p>
+                        )}
+                        {opp.relevance && opp.relevance.reasons.length > 0 && (
+                          <div className="mt-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedOppId(expanded ? null : opp.id)
+                              }
+                              aria-expanded={expanded}
+                              className="text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                            >
+                              {expanded ? "Hide why this" : "Why this?"}
+                            </button>
+                            {expanded && (
+                              <ul className="mt-1 space-y-0.5 text-xs text-stone-400">
+                                {opp.relevance.reasons.map((reason) => (
+                                  <li key={reason}>• {reason}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+                          <a
+                            href={opp.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-xs font-medium text-teal-300 hover:underline"
+                          >
+                            Open listing →
+                          </a>
+                          {opp.watchId && (
+                            <button
+                              type="button"
+                              onClick={() => void reevaluateOpp(opp.id)}
+                              disabled={reevaluatingId === opp.id}
+                              className="text-xs font-medium text-stone-400 hover:text-stone-200 hover:underline disabled:opacity-50"
+                            >
+                              {reevaluatingId === opp.id
+                                ? "Re-checking…"
+                                : "Re-check now"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => remindAboutOpportunity(opp)}
+                            className="text-xs font-medium text-stone-400 hover:text-stone-200 hover:underline"
+                          >
+                            Remind me
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => askAboutOpportunity(opp)}
+                            className="text-xs font-medium text-stone-400 hover:text-stone-200 hover:underline"
+                          >
+                            Ask about this
+                          </button>
+                          {opp.status === "active" && (
+                            <button
+                              type="button"
+                              onClick={() => void markOppRead(opp.id)}
+                              className="text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                            >
+                              Mark read
+                            </button>
+                          )}
+                          {opp.status !== "dismissed" && (
+                            <button
+                              type="button"
+                              onClick={() => void dismissOpp(opp.id)}
+                              className="text-xs text-stone-500 hover:text-rose-300 hover:underline"
+                            >
+                              Dismiss
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <div className="flex h-full flex-col">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-stone-100">
+                    Chat with Wisora
+                  </h2>
+                  <p className="mt-1 text-xs text-stone-500">
+                    Follow-ups about tracked products, prices, and past
+                    decisions — answered from your saved data.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  {chatThread && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChatThread(null);
+                        setChatInput("");
+                        setChatProduct(null);
+                      }}
+                      className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                    >
+                      New chat
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setChatOpen(false)}
+                    className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-stone-300 transition hover:border-white/30 hover:text-stone-100"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+              {chatError && (
+                <p className="mt-3 rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-200">
+                  {chatError}
+                </p>
+              )}
+              {chatThread ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChatThread(null);
+                      setChatProduct(null);
+                    }}
+                    className="mt-2 self-start text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                  >
+                    ← All conversations
+                  </button>
+                  <div
+                    className="mt-2 flex-1 space-y-3 overflow-y-auto"
+                    aria-live="polite"
+                  >
+                    {chatThread.messages.map((message) => (
+                      <div
+                        key={message.id}
+                        className={
+                          message.role === "user"
+                            ? "ml-8 rounded-xl border border-teal-300/25 bg-teal-300/5 p-3"
+                            : "mr-8 rounded-xl border border-white/10 bg-white/[0.02] p-3"
+                        }
+                      >
+                        <p className="text-sm leading-relaxed break-words whitespace-pre-wrap text-stone-200">
+                          {message.text}
+                        </p>
+                        {message.sources && message.sources.length > 0 && (
+                          <div className="mt-1.5 flex flex-wrap gap-2">
+                            {message.sources.map((source) =>
+                              source.url ? (
+                                <a
+                                  key={source.label}
+                                  href={source.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title={source.label}
+                                  className="max-w-full truncate text-xs text-teal-300 hover:underline"
+                                >
+                                  {source.label} →
+                                </a>
+                              ) : (
+                                <span
+                                  key={source.label}
+                                  className="text-xs text-stone-500"
+                                >
+                                  {source.label}
+                                </span>
+                              ),
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {chatSending && (
+                      <p className="text-xs text-stone-500">Thinking…</p>
+                    )}
+                    <div ref={chatEndRef} />
+                  </div>
+                </>
+              ) : (
+                <div className="mt-3 flex-1 overflow-y-auto">
+                  {chatLoading ? (
+                    <p className="text-xs text-stone-500">Loading…</p>
+                  ) : chatThreads.length === 0 ? (
+                    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+                      <p className="text-sm text-stone-300">
+                        No conversations yet.
+                      </p>
+                      <p className="mt-1 text-xs text-stone-500">
+                        Try “What am I tracking?”, “Is the Lenovo still a good
+                        deal?”, or “Compare my shortlist”.
+                      </p>
+                    </div>
+                  ) : (
+                    <ul className="space-y-2">
+                      {chatThreads.map((thread) => (
+                        <li
+                          key={thread.id}
+                          className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] p-3"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setChatThread(thread);
+                              setChatProduct(null);
+                            }}
+                            className="min-w-0 flex-1 text-left"
+                          >
+                            <span className="block truncate text-sm font-medium text-stone-100 hover:text-teal-200">
+                              {thread.title}
+                            </span>
+                            <span className="text-xs text-stone-500">
+                              {thread.messages.length} message
+                              {thread.messages.length === 1 ? "" : "s"} ·{" "}
+                              {formatRelative(thread.updatedAt, nowMs)}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void deleteChatThreadById(thread.id)}
+                            aria-label={`Delete ${thread.title}`}
+                            className="shrink-0 text-xs text-stone-500 hover:text-rose-300 hover:underline"
+                          >
+                            Delete
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              {chatProduct && (
+                <div className="mt-2 flex items-center gap-2">
+                  <span
+                    title={chatProduct.title}
+                    className="max-w-full truncate rounded-full border border-teal-300/30 bg-teal-300/10 px-2.5 py-0.5 text-xs text-teal-200"
+                  >
+                    About: {chatProduct.title}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setChatProduct(null)}
+                    className="shrink-0 text-xs text-stone-500 hover:text-stone-200 hover:underline"
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
+              <form
+                className="mt-2 flex gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void sendChat();
+                }}
+              >
+                <input
+                  type="text"
+                  value={chatInput}
+                  onChange={(event) => setChatInput(event.target.value)}
+                  placeholder="Ask about your tracked products…"
+                  aria-label="Chat message"
+                  maxLength={2000}
+                  className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/5 p-2.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/60 focus:ring-2 focus:ring-teal-300/20 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={chatSending || chatInput.trim().length === 0}
+                  className="shrink-0 rounded-lg bg-white px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {chatSending ? "…" : "Send"}
+                </button>
+              </form>
             </div>
           )}
         </section>
@@ -3707,27 +5635,79 @@ export default function Home() {
                 </span>
               )}
             </button>
+            {user && historyEntries.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setHistoryOpen((open) => !open)}
+                aria-expanded={historyOpen}
+                className="rounded-lg border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-semibold text-stone-200 backdrop-blur transition hover:border-teal-300/50 hover:text-teal-200"
+              >
+                History ({historyEntries.length})
+              </button>
+            )}
             <span className="text-xs text-stone-500">
               Search runs against live sources only — no mock data.
             </span>
           </div>
         </form>
 
-        <div className="mt-4 flex flex-wrap gap-2" aria-label="Example requests">
-          {EXAMPLES.map((example) => (
-            <button
-              key={example}
-              type="button"
-              onClick={() => {
-                setQuery(example);
-                void analyze(example);
-              }}
-              className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-left text-xs text-stone-300 backdrop-blur transition hover:border-teal-300/40 hover:text-teal-200"
-            >
-              {example}
-            </button>
-          ))}
-        </div>
+        {user && historyOpen && historyEntries.length > 0 && (
+          <section
+            aria-label="Previous searches"
+            className="glass mt-4 rounded-2xl p-5"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-base font-semibold text-stone-100">
+                Previous searches
+              </h2>
+              <button
+                type="button"
+                onClick={deleteAllHistory}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-stone-300 transition hover:border-white/20 hover:text-stone-100"
+              >
+                Clear all
+              </button>
+            </div>
+            <ul className="mt-3 space-y-2">
+              {historyEntries.map((entry) => (
+                <li
+                  key={entry.id}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm"
+                >
+                  <button
+                    type="button"
+                    onClick={() => restoreHistory(entry)}
+                    title="Restore this search and its results"
+                    className="min-w-0 flex-1 truncate text-left font-medium text-stone-100 hover:text-teal-200"
+                  >
+                    {entry.query}
+                  </button>
+                  {entry.verdict && (
+                    <span className="rounded-full border border-teal-300/25 bg-teal-300/10 px-2 py-0.5 text-xs font-semibold text-teal-200">
+                      {entry.verdict}
+                    </span>
+                  )}
+                  {entry.topPick && (
+                    <span className="w-full truncate text-xs text-stone-400">
+                      Top pick: {entry.topPick}
+                    </span>
+                  )}
+                  <span className="text-xs text-stone-500">
+                    {formatSavedDate(entry.savedAt)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => deleteHistoryEntry(entry.id)}
+                    aria-label={`Remove "${entry.query}" from history`}
+                    className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-xs font-medium text-stone-400 transition hover:border-white/20 hover:text-stone-100"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </section>
 
       <div aria-live="polite">
@@ -3743,9 +5723,18 @@ export default function Home() {
             ref={intentRef}
             className="glass mt-8 scroll-mt-4 rounded-2xl p-5"
           >
-            <h2 className="text-base font-semibold text-stone-100">
-              What we understood
-            </h2>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-base font-semibold text-stone-100">
+                What we understood
+              </h2>
+              <button
+                type="button"
+                onClick={clearResults}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-stone-300 transition hover:border-white/20 hover:text-stone-100"
+              >
+                Clear results
+              </button>
+            </div>
             <dl className="mt-3 space-y-2 text-sm">
               <div className="flex flex-wrap gap-2">
                 <dt className="font-medium text-stone-300">Category:</dt>

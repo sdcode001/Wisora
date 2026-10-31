@@ -15,9 +15,16 @@ export interface SendResult {
   error?: string;
 }
 
+export interface OutgoingEmail {
+  to: string;
+  subject: string;
+  text: string;
+}
+
 export interface Notifier {
   readonly available: boolean;
   sendAlert(input: EmailAlert): Promise<SendResult>;
+  sendEmail(input: OutgoingEmail): Promise<SendResult>;
 }
 
 function formatBody(input: EmailAlert): string {
@@ -47,17 +54,14 @@ export class ResendNotifier implements Notifier {
     private readonly from: string,
   ) {}
 
-  async sendAlert(input: EmailAlert): Promise<SendResult> {
+  async sendEmail(input: OutgoingEmail): Promise<SendResult> {
     try {
       const resend = new Resend(this.apiKey);
       const { error } = await resend.emails.send({
         from: this.from,
         to: input.to,
-        subject:
-          `Price alert: ${input.productTitle} at ` +
-          `₹${input.observedPrice.toLocaleString("en-IN")} ` +
-          `(target ₹${input.targetPrice.toLocaleString("en-IN")})`,
-        text: formatBody(input),
+        subject: input.subject,
+        text: input.text,
       });
       if (error) {
         return { sent: false, error: error.message.slice(0, 300) };
@@ -73,12 +77,31 @@ export class ResendNotifier implements Notifier {
       };
     }
   }
+
+  async sendAlert(input: EmailAlert): Promise<SendResult> {
+    return this.sendEmail({
+      to: input.to,
+      subject:
+        `Price alert: ${input.productTitle} at ` +
+        `₹${input.observedPrice.toLocaleString("en-IN")} ` +
+        `(target ₹${input.targetPrice.toLocaleString("en-IN")})`,
+      text: formatBody(input),
+    });
+  }
 }
 
 export class UnavailableNotifier implements Notifier {
   readonly available = false;
 
   async sendAlert(): Promise<SendResult> {
+    return {
+      sent: false,
+      error:
+        "Email is not configured (RESEND_API_KEY and RESEND_FROM are required).",
+    };
+  }
+
+  async sendEmail(): Promise<SendResult> {
     return {
       sent: false,
       error:

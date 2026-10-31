@@ -112,6 +112,11 @@ If `npm` fails with EPERM on `~/.npm`, fix ownership once:
 | `WISORA_CHECK_INTERVAL_MINUTES` | no | Background watch-check interval in minutes (default `240` = 4h, min 5) |
 | `WISORA_MAX_CHECKS_PER_CYCLE` | no | Max watches re-checked per background cycle (default `10`, clamped 1–50) |
 | `WISORA_MONITORING` | no | Set to `off` to disable the background price monitor |
+| `WISORA_OPP_MIN_DROP_PERCENT` / `WISORA_OPP_MIN_DROP_INR` | no | Price-drop floors: both must pass (defaults `5`% and `₹500`) |
+| `WISORA_OPP_MIN_RISE_PERCENT` / `WISORA_OPP_MIN_RISE_INR` | no | Price-rise floors: both must pass (defaults `10`% and `₹1000`) |
+| `WISORA_OPP_RANGE_DAYS` | no | Favorable-range lookback in days (default `30`) |
+| `WISORA_OPP_RANGE_TOLERANCE_PERCENT` | no | Within this % of the window low counts as "in range" (default `2`) |
+| `WISORA_OPP_STALE_DAYS` | no | Observations older than this never trigger anything (default `7`) |
 
 All secrets stay server-side in `.env` (gitignored). They are never logged,
 never sent to the browser, and never printed by any script. Without keys the
@@ -177,7 +182,60 @@ Tata CLiQ, Nykaa Fashion.
 - `GET /api/prices/insights?ids=a,b` — batch price history (1–10 ids) for
   product cards: latest observation, stats, recent observations
 - `GET /api/prices/monitor` — background monitor status (active, interval,
-  email configured)
+  email configured, last run counts)
+- `GET /api/opportunities` — feed cards (`?status=active|read|dismissed|all`,
+  `?kind=`, `?category=`, `?limit=`), sorted by relevance then recency
+- `POST /api/opportunities/read` — `{ ids: [...] | "all" }` marks active
+  cards read
+- `POST /api/opportunities/dismiss` — `{ id }` dismisses a card (dismissed
+  states never re-alert)
+- `POST /api/opportunities/re-evaluate` — `{ id }` → fresh watch check +
+  detection for that card
+- `GET / POST / PUT / DELETE /api/reminders` — one-time revisit reminders
+  (`?status=` filter; PUT cannot mark done — only the scheduler fires)
+- `GET / PUT /api/settings/notifications` — proactive toggle and per-kind
+  email preferences (every trigger sends while its kind stays on)
+- `POST /api/chat` — `{ message, threadId?, productId? }` → grounded reply
+  (stored-data rules first, one LLM call at most, honest offline fallback)
+- `GET / DELETE /api/chat/threads` — persisted conversation threads
+
+## Proactive copilot
+
+Wisora watches what you track and flags meaningful changes:
+
+- **Opportunity detection** (`lib/opportunities/`) runs on verified price
+  observations and watch-check statuses — target hits, significant moves
+  (both %-and-₹ floors must pass), range re-entries, and
+  unavailable/restored transitions. Stale (>7d) or undated evidence never
+  fires. One product yields at most one price card per evaluation
+  (target → range → move), and every card dedupes by state — including
+  dismissed ones, so a dismissal is never re-alerted for the same state.
+- **Relevance** scores cards against saved brands, budgets, and categories,
+  and suppresses only explicit "no" signals: avoided brands, rejected or
+  already-purchased products. Watches are explicit intent, so over-budget
+  or off-category cards rank lower but stay visible.
+- **Scheduler**: the background monitor (`instrumentation.ts`, same
+  single-instance caveat as before) re-checks due watches, evaluates
+  opportunities, fires due reminders (time-due or fresh target hits), and
+  sends emails — recording every run's counts for the status API. Users
+  who disable proactive cards keep checks and target alerts, but get no
+  new opportunities, reminders, or emails.
+- **Email**: per-event Resend templates gated only by per-user
+  preferences — every trigger sends while its kind stays on. The
+  scheduler has no session, so email goes only to the address stored on
+  the watch; every outcome (sent, failed, skipped with reason) is
+  recorded on the card or reminder.
+- **Reminders** are one-time revisit nudges — time-based, target-based, or
+  both — never predictions. They fire once, then stay done unless
+  re-activated.
+- **Chat** (`/api/chat` + Chat rail) answers follow-ups from stored data
+  first (prices, changes, deal status, shortlist compare — all offline),
+  then at most one grounded LLM call over retrieved context with
+  history-vs-current labeling, then an honest offline fallback. Threads
+  persist per user (20 threads × 50 messages, capped).
+- **Honesty boundaries**: no card, email, or chat answer is ever built
+  from failed fetches, unparseable pages, or stale data presented as
+  current; cards show evidence age and warn when it exceeds a week.
 
 ## Limitations (Phase 1)
 

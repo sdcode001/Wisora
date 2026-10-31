@@ -37,6 +37,7 @@ function stubProvider(available: boolean, value: LlmRequirements): LlmProvider {
     explainVerdict: () => Promise.reject(new Error("unused")),
     extractRequirements: () => Promise.resolve(value),
     extractReviewThemes: () => Promise.reject(new Error("unused")),
+    answerGrounded: () => Promise.reject(new Error("unused")),
   };
 }
 

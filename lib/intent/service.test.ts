@@ -18,6 +18,7 @@ function stubProvider(
     explainVerdict: () => Promise.reject(new Error("unused")),
     extractRequirements: () => Promise.reject(new Error("unused")),
     extractReviewThemes: () => Promise.reject(new Error("unused")),
+    answerGrounded: () => Promise.reject(new Error("unused")),
   };
 }
 

@@ -1,4 +1,9 @@
 import type {
+  NewOpportunity,
+  Opportunity,
+  OpportunityStatus,
+} from "../opportunities/schema";
+import type {
   NewPriceAlert,
   NewWatch,
   PriceAlert,
@@ -7,14 +12,24 @@ import type {
   WatchCheck,
   WatchUpdate,
 } from "../prices/observation";
+import type { MonitorRun, NewMonitorRun } from "../prices/run";
 import type { UserProfile } from "./profile";
 import type {
+  ChatThread,
   DecisionRecord,
   Feedback,
+  NewChatMessage,
+  NewChatThread,
   NewDecisionRecord,
   NewFeedback,
+  NewReminder,
   NewSavedComparison,
   NewSavedProduct,
+  NotificationSettings,
+  NotificationSettingsPatch,
+  Reminder,
+  ReminderSystemUpdate,
+  ReminderUpdate,
   SavedComparison,
   SavedProduct,
 } from "./records";
@@ -105,6 +120,69 @@ export interface MemoryStore {
     email: { attempted: boolean; sent: boolean; error?: string },
   ): Promise<void>;
 
+  listOpportunities(
+    userSub: string,
+    limit?: number,
+  ): Promise<Opportunity[]>;
+  saveOpportunity(
+    userSub: string,
+    input: NewOpportunity,
+  ): Promise<Opportunity>;
+  updateOpportunityStatus(
+    userSub: string,
+    id: string,
+    status: OpportunityStatus,
+  ): Promise<Opportunity | null>;
+  findOpportunityByDedupeKey(
+    userSub: string,
+    dedupeKey: string,
+  ): Promise<Opportunity | null>;
+  updateOpportunityEmail(
+    userSub: string,
+    opportunityId: string,
+    email: { attempted: boolean; sent: boolean; error?: string },
+  ): Promise<void>;
+
+  listReminders(userSub: string): Promise<Reminder[]>;
+  saveReminder(userSub: string, input: NewReminder): Promise<Reminder>;
+  updateReminder(
+    userSub: string,
+    update: ReminderUpdate | ReminderSystemUpdate,
+  ): Promise<Reminder | null>;
+  deleteReminder(userSub: string, id: string): Promise<boolean>;
+  updateReminderEmail(
+    userSub: string,
+    reminderId: string,
+    email: { attempted: boolean; sent: boolean; error?: string },
+  ): Promise<void>;
+
+  /** Defaults when never saved; reads never write. */
+  getNotificationSettings(userSub: string): Promise<NotificationSettings>;
+  saveNotificationSettings(
+    userSub: string,
+    patch: NotificationSettingsPatch,
+  ): Promise<NotificationSettings>;
+
+  listChatThreads(userSub: string): Promise<ChatThread[]>;
+  getChatThread(userSub: string, id: string): Promise<ChatThread | null>;
+  createChatThread(
+    userSub: string,
+    input: NewChatThread,
+  ): Promise<ChatThread>;
+  appendChatMessages(
+    userSub: string,
+    threadId: string,
+    messages: NewChatMessage[],
+  ): Promise<ChatThread | null>;
+  deleteChatThread(userSub: string, id: string): Promise<boolean>;
+
+  /** Global monitor-run log (counts only, no user data). */
+  recordMonitorRun(input: NewMonitorRun): Promise<MonitorRun>;
+  listMonitorRuns(limit?: number): Promise<MonitorRun[]>;
+
   /** Owner subs for dirs holding watches (monitor cycle only). */
   listWatchOwners(): Promise<string[]>;
+
+  /** Owner subs for dirs holding active reminders (monitor cycle only). */
+  listReminderOwners(): Promise<string[]>;
 }
