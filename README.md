@@ -1,283 +1,160 @@
-# Wisora
+# Wisora — Buy With Evidence, Not Anxiety
 
-Smarter purchasing decisions, backed by evidence. Describe what you want in
-natural language; Wisora detects the category, searches configured Indian
-shopping sources, compares real options, and gives a reasoned BUY / WAIT /
-AVOID recommendation with traceable links. It never invents products, prices,
-or reviews.
+## Goal
 
-Status: Phase 4 complete — personalization and user memory on top of
-the Phase 3 decision engine: saved general and per-category preferences,
-personalized scoring with attribution, decision history, feedback, and
-user-approved suggestions.
+Online shopping buries consumers in options: dozens of tabs, sponsored
+reviews of unknown trustworthiness, prices that shift daily, and no clear
+answer to the only question that matters — *should I buy this, and if so,
+which one?*
 
-## How it works
+Wisora's goal is to be a personal purchasing advisor that turns that chaos
+into one clear, evidence-backed decision — and then keeps watching the
+market on your behalf after you leave.
 
-1. You describe a need by typing or voice input (Chrome/Edge), e.g. "Find a laptop under ₹90,000 for .NET development."
-2. Muse interprets the request (category, budget range, search terms) with
-   validated, schema-checked output; deterministic rules fill any gaps and
-   take over fully when no API key is configured. Wisora then extracts
-   requirements — must-haves, nice-to-haves, and explicit exclusions — and
-   asks at most two clarification questions when something material is
-   ambiguous.
-3. You answer any clarification questions, then correct the category and
-   toggle shopping sources if needed. Product search stays disabled until
-   requirement understanding is complete.
-4. One search fans out to the enabled sources through a domain-restricted
-   search API; results are normalized, attributed, deduplicated, and enriched
-   with prices, review ratings, and product photos seen on retailer pages.
-5. Options that violate the budget, a mandatory requirement, or an
-   exclusion are filtered out with stated reasons. Survivors are scored on
-   four weighted dimensions (price fit, relevance, evidence, preferences);
-   Muse proposes a verdict, which is then validated against hard rules
-   (budget vetoes, grounded product references, no invented prices, no
-   sale-prediction waits).
-6. Once the recommendation is ready, you get the top 5 picks as product
-   cards with score breakdowns and per-requirement checks, side-by-side
-   comparison (including review ratings), an excluded-options panel, an
-   evidence-confidence meter, and a verdict panel with reasons, trade-offs,
-   and uncertainties. Scoring weights are adjustable without re-searching.
-7. Optionally, "Get review insights" searches configured review sources for
-   the top 3 picks, extracts recurring strengths and concerns with cited
-   sources, grades evidence quality, and shows bounded score adjustments
-   (+5/−8 max) with rank-impact notes. Single-source findings stay
-   preliminary; contradictions add uncertainty instead of points.
-8. Signed-in users can save general and per-category preferences (brands,
-   budgets, priorities) from Preferences; future recommendations apply
-   them with a full attribution report, and each search can opt out once
-   via "Use my saved preferences". Decisions can be saved, recommendations
-   rated, and inferred suggestions confirmed, edited, or dismissed from
-   the Suggestions inbox. All saved data is reviewable and clearable from
-   Preferences.
+## How It Solves This
+
+Wisora replaces manual research with a guided pipeline:
+
+1. **Understand** — You describe what you need in plain words. Meta's Muse
+   Spark model extracts the category, budget, and search terms.
+2. **Clarify** — The system asks about requirements (must-haves,
+   nice-to-haves, deal-breakers) so the verdict fits your actual needs.
+3. **Research** — Live listings are fetched from real sources — no mock
+   data — and every option is scored transparently on price fit,
+   relevance, evidence strength, and your saved preferences.
+4. **Decide** — You get one verdict — BUY, WAIT, or AVOID — with reasoning,
+   trade-offs, uncertainties, and review insights. When evidence is too
+   thin, it says INSUFFICIENT_EVIDENCE or NEEDS_CLARIFICATION instead of
+   guessing.
+5. **Watch** — Set a target price once. A background monitor re-checks it
+   on schedule and alerts you the moment your price is hit.
+6. **Learn** — Your feedback (prefer, reject, purchased) becomes saved
+   preferences, so every future verdict is more yours than the last.
+
+The governing principle: **evidence over hallucination**. Deterministic
+code scores, detects, and calculates; the model interprets and synthesizes
+— never invents products, prices, or reviews.
+
+## How It Works — End to End
+
+**Search & verdict.** Enter a request like "laptop under ₹90,000 for .NET
+development." Wisora interprets the intent, gathers requirements through
+clarifying questions (with adjustable priority weights and an optional 25%
+flexible-budget re-search), searches live sources, ranks every product with
+a visible score breakdown, and delivers a verdict naming the exact product,
+why it won, what you give up, and what could change the answer.
+
+**Review insights.** For the top picks, Wisora reads real review pages and
+mines recurring themes — strengths and concerns — each traced to its
+source, with contradictions flagged when sources disagree.
+
+**Compare & decide.** Shortlist up to a few options for a side-by-side
+comparison, then save the decision. Saved decisions build your decision
+history.
+
+**Watchlist & price monitoring.** Track any product with a target price. A
+scheduled monitor re-checks watches, records every price observation, and
+keeps a run log with a status view.
+
+**Opportunity alerts.** A deterministic detection engine watches every
+fresh observation and raises alerts for target hits, significant price
+drops and rises, back-in-range moments, and availability changes
+(out-of-stock / back-in-stock). Guards keep it quiet when it should be:
+dual %-and-₹ floors on every move, stale-evidence rejection, transient
+failures never alert, one card per product per check, and dismissals that
+stay dismissed. Active alerts rotate in a compact feed; clicking one opens
+the full list.
+
+**Email notifications.** Every trigger sends an email immediately — no
+daily cap, no batching — as long as that notification type is enabled.
+Per-kind preferences (price, availability, reminder) live in Notification
+Settings.
+
+**Reminders.** One-time revisit nudges — time-based ("check this Saturday"),
+target-based, or both. They fire once, then stay done unless re-activated.
+
+**Chat.** A grounded assistant answers follow-ups ("why not the second
+option?") from your stored data first — prices, changes, comparisons — and
+only then makes one Meta-model call over retrieved context, labeling
+history vs. current data. Offline, it says so honestly instead of guessing.
+
+**Search history.** Every completed search persists with its full results
+and restores in one click with zero recompute.
+
+**Preferences & personalization.** Save brands, budgets, categories, and
+priorities. The verdict shows exactly which preferences were applied, and
+your current request always wins over anything saved.
+
+**Feedback loop.** Prefer, reject (with a reason), or mark purchased on any
+verdict. Feedback becomes proposed preference updates for your approval —
+rejected and purchased products are suppressed from future verdicts and
+alerts automatically.
 
 ## Stack
 
-- Next.js 16 (App Router, webpack build) + TypeScript (strict) + Tailwind CSS v4
-- Zod for runtime validation of config, products, and model outputs
-- Runtime LLM: local `muse` CLI (`muse-spark-1.3`), key-authenticated via
-  `--api-key-stdin` — no Anthropic account needed
-- Product search: Tavily Search with `include_domains` restriction +
-  Tavily Extract for price/image enrichment
-- Tests: Vitest (minimal suite over the highest-risk logic)
+- **Model:** Meta Muse Spark (`muse-spark-1.3`) via the Meta Model API —
+  all interpretation (intent, requirements, verdicts, review themes, chat).
+- **Live search:** Tavily — product discovery and review-page reading.
+- **Email:** Resend — per-event alert delivery.
+- **Auth:** Google OAuth — sign-in; all data namespaced per account.
+- **App:** Next.js 16 + React 19 + TypeScript (strict) + Zod runtime
+  validation + Tailwind CSS.
+- **Storage:** JSON files under `data/` (gitignored) — no database server.
+- **Tests:** Vitest — 454 tests guarding the behaviors above.
+- **Discipline:** five runtime dependencies total. No agent frameworks, no
+  vector databases, no MCP servers. Deterministic code decides; the model
+  interprets.
 
-## Setup
+## Setup Guide
 
-Requires Node 22+ and npm, plus the `muse` CLI on your `PATH`
-(the app shells out to `muse exec` for reasoning).
+Prerequisites: Node.js 20+ and npm.
 
-```sh
+```bash
+git clone <repo-url> && cd Wisora
 npm install
 cp .env.example .env
-# fill in META_API_KEY, TAVILY_API_KEY, GOOGLE_OAUTH_CLIENT_ID, and
-# SESSION_SECRET in .env (never commit it)
+# Fill in the four required values below, then:
 npm run dev
 ```
 
-For Google sign-in, create an OAuth client ID of type "Web application" in
-[Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-and register `http://localhost:3000` as an authorized JavaScript origin
-(add your production origin when deploying). No client secret is needed:
-the login page uses Google Identity Services, and the server verifies the
-signed ID token directly with Google's published keys.
+Open http://localhost:3000, sign in with Google, and run your first search.
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Useful commands:
 
-If `npm` fails with EPERM on `~/.npm`, fix ownership once:
-`sudo chown -R $(id -u):$(id -g) ~/.npm`.
+```bash
+npm test        # full suite (454 tests)
+npm run typecheck
+npm run lint
+npm run build && npm start   # production
+```
 
-## Scripts
+## Required Environment
 
-- `npm run dev` — start the dev server (webpack)
-- `npm run build` / `npm start` — production build / serve
-- `npm run lint` — ESLint
-- `npm run typecheck` — TypeScript check
-- `npm test` — minimal test suite
+Only four values are required in `.env`:
 
-## Environment
-
-| Variable | Required | Purpose |
+| Variable | Purpose | Where to get it |
 |---|---|---|
-| `META_API_KEY` | yes (for AI reasoning) | Muse Meta API key, piped to `muse exec` via stdin |
-| `TAVILY_API_KEY` | yes (for live search) | Tavily key for domain-restricted search + extract |
-| `GOOGLE_OAUTH_CLIENT_ID` | yes (for sign-in) | Google OAuth web client ID; public, also served to the login page |
-| `SESSION_SECRET` | yes (for sign-in) | Random secret for signing session cookies (server-side only) |
-| `WISORA_MUSE_MODEL` | no | Model id (default `muse-spark-1.3`) |
-| `WISORA_MUSE_EFFORT_CLASSIFY` | no | Effort for intent extraction (default `low`) |
-| `WISORA_MUSE_EFFORT_REASON` | no | Effort for verdict rationale (default `medium`) |
-| `WISORA_MUSE_BIN` | no | `muse` binary path (default `muse` on `PATH`) |
-| `WISORA_MUSE_BASE_URL` | no | Only if your key targets a non-default endpoint |
-| `WISORA_DATA_DIR` | no | Directory for per-user preference files (default `./data`, gitignored) |
-| `RESEND_API_KEY` | no | Resend key for price-alert emails; without it, alerts are in-app only |
-| `RESEND_FROM` | no | Verified sender address for alert emails (required together with the key, e.g. `Wisora <alerts@yourdomain.com>`) |
-| `WISORA_CHECK_INTERVAL_MINUTES` | no | Background watch-check interval in minutes (default `240` = 4h, min 5) |
-| `WISORA_MAX_CHECKS_PER_CYCLE` | no | Max watches re-checked per background cycle (default `10`, clamped 1–50) |
-| `WISORA_MONITORING` | no | Set to `off` to disable the background price monitor |
-| `WISORA_OPP_MIN_DROP_PERCENT` / `WISORA_OPP_MIN_DROP_INR` | no | Price-drop floors: both must pass (defaults `5`% and `₹500`) |
-| `WISORA_OPP_MIN_RISE_PERCENT` / `WISORA_OPP_MIN_RISE_INR` | no | Price-rise floors: both must pass (defaults `10`% and `₹1000`) |
-| `WISORA_OPP_RANGE_DAYS` | no | Favorable-range lookback in days (default `30`) |
-| `WISORA_OPP_RANGE_TOLERANCE_PERCENT` | no | Within this % of the window low counts as "in range" (default `2`) |
-| `WISORA_OPP_STALE_DAYS` | no | Observations older than this never trigger anything (default `7`) |
+| `META_API_KEY` | Meta Model API key for all interpretation | Meta developer console |
+| `TAVILY_API_KEY` | Live product + review search | https://tavily.com |
+| `GOOGLE_OAUTH_CLIENT_ID` | Google sign-in (Web application type; register `http://localhost:3000` as an authorized JavaScript origin) | https://console.cloud.google.com/apis/credentials |
+| `SESSION_SECRET` | Signs session cookies (`openssl rand -base64 32`) | Generate locally |
 
-All secrets stay server-side in `.env` (gitignored). They are never logged,
-never sent to the browser, and never printed by any script. Without keys the
-app still runs: intent analysis falls back to rules, and search reports
-exactly which key is missing instead of showing mock data.
+Everything else is optional with sane defaults: `RESEND_*` (without it,
+alerts are in-app only), `WISORA_CHECK_INTERVAL_MINUTES` (default 240),
+`WISORA_MUSE_*` model/effort overrides. See `.env.example`.
 
-## Shopping sources
+## Future Scope
 
-Single source of truth: `config/sources.ts`. Edit that file to add, remove,
-enable, or disable a source — nothing else duplicates the list.
+Wisora works end to end today; what comes next is making it sharper and
+more trustworthy:
 
-Phase 1 sources: Amazon India, Flipkart, ShopClues, Snapdeal, Myntra, AJIO,
-Tata CLiQ, Nykaa Fashion.
+- **Accuracy** — richer requirement understanding, better price-identity
+  matching across merchants for the same product, review-source quality
+  weighting, and tighter verdict calibration against real outcomes.
+- **Reliability** — hardened check scheduling for multi-instance deploys,
+  broader source coverage with graceful degradation, and deeper
+  regression coverage as behaviors grow.
 
-## API routes
-
-- `POST /api/intent` — `{ query }` → detected category, budget, search terms
-- `POST /api/requirements` — `{ query, intent?, answers? }` → requirement
-  set + clarification questions + suggested category
-- `POST /api/search` — `{ query, category?, disabled?, maxResults?,
-  allowOverBudget? }` → normalized products + per-source statuses +
-  warnings (`allowOverBudget` widens a stated budget max by 25% in the
-  search query so near-budget options can surface)
-- `POST /api/recommend` — full pipeline (or pass-through of `products` from
-  `/api/search` to avoid re-searching; accepts `requirements`, `weights`,
-  `allowOverBudget`, `personalize`) → ranked products with score breakdowns
-  and evidence, excluded options, confidence assessment, validated verdict,
-  and a `personalization` report (which saved preferences applied, which
-  were skipped, and budget/weights provenance). Signed-in requests apply
-  the user's saved profile unless `personalize: false` opts out for one
-  query; current instructions always win over stored preferences.
-- `POST /api/reviews` — `{ products (1–3), category?, requirements?,
-  rankedTotals? }` → per-product review records, validated insights,
-  contradictions, evidence quality, and bounded score adjustments
-- `GET / PUT /api/profile` — signed-in user's preference profile
-  (`{ profile }`, null before anything is saved); `DELETE` clears it
-- `GET / PUT /api/profile/[category]` — per-category preferences
-  (`{ category, preferences }`); PUT merges, explicit null removes a field
-- `GET / POST /api/memory/decisions` — saved recommendation snapshots
-  (`?limit=`, newest-first)
-- `GET / POST /api/memory/saved/products` (+ `DELETE ?productId=`) —
-  saved product keepsakes (re-saving upserts)
-- `GET / POST /api/memory/saved/comparisons` (+ `DELETE ?id=`) — saved
-  2–6 product comparison sets
-- `GET / POST /api/memory/feedback` — recommendation feedback: helpful,
-  preferred/rejected/purchased products, reasons, notes
-- `GET /api/memory/proposals` — pending inferred-preference proposals
-  (reading also runs detection; nothing is inferred silently)
-- `POST /api/memory/proposals/decide` — `{ id, decision:
-  confirmed|rejected, patch? }`; confirmations apply to the profile with
-  `confirmed` provenance
-- `DELETE /api/memory/history` — clear decisions, feedback, and
-  proposals (saved items and the profile are kept)
-- `GET / POST / PUT / DELETE /api/memory/watches` — price watches:
-  `{ productId, url, title, merchant, targetPrice, canWait? }`; GET returns
-  watches enriched with latest observation, windowed stats, recent history,
-  and unread-alert counts; POST evaluates immediately against known history
-- `POST /api/memory/watches/check` — `{ id }` → re-check one watch now
-  (fresh page extract, observation, evaluation, alert on target met)
-- `GET /api/memory/alerts` — price alerts, newest-first (`?limit=`)
-- `POST /api/memory/alerts/read` — `{ all: true }` or `{ ids: [...] }`
-  marks alerts read
-- `GET /api/prices/insights?ids=a,b` — batch price history (1–10 ids) for
-  product cards: latest observation, stats, recent observations
-- `GET /api/prices/monitor` — background monitor status (active, interval,
-  email configured, last run counts)
-- `GET /api/opportunities` — feed cards (`?status=active|read|dismissed|all`,
-  `?kind=`, `?category=`, `?limit=`), sorted by relevance then recency
-- `POST /api/opportunities/read` — `{ ids: [...] | "all" }` marks active
-  cards read
-- `POST /api/opportunities/dismiss` — `{ id }` dismisses a card (dismissed
-  states never re-alert)
-- `POST /api/opportunities/re-evaluate` — `{ id }` → fresh watch check +
-  detection for that card
-- `GET / POST / PUT / DELETE /api/reminders` — one-time revisit reminders
-  (`?status=` filter; PUT cannot mark done — only the scheduler fires)
-- `GET / PUT /api/settings/notifications` — proactive toggle and per-kind
-  email preferences (every trigger sends while its kind stays on)
-- `POST /api/chat` — `{ message, threadId?, productId? }` → grounded reply
-  (stored-data rules first, one LLM call at most, honest offline fallback)
-- `GET / DELETE /api/chat/threads` — persisted conversation threads
-
-## Proactive copilot
-
-Wisora watches what you track and flags meaningful changes:
-
-- **Opportunity detection** (`lib/opportunities/`) runs on verified price
-  observations and watch-check statuses — target hits, significant moves
-  (both %-and-₹ floors must pass), range re-entries, and
-  unavailable/restored transitions. Stale (>7d) or undated evidence never
-  fires. One product yields at most one price card per evaluation
-  (target → range → move), and every card dedupes by state — including
-  dismissed ones, so a dismissal is never re-alerted for the same state.
-- **Relevance** scores cards against saved brands, budgets, and categories,
-  and suppresses only explicit "no" signals: avoided brands, rejected or
-  already-purchased products. Watches are explicit intent, so over-budget
-  or off-category cards rank lower but stay visible.
-- **Scheduler**: the background monitor (`instrumentation.ts`, same
-  single-instance caveat as before) re-checks due watches, evaluates
-  opportunities, fires due reminders (time-due or fresh target hits), and
-  sends emails — recording every run's counts for the status API. Users
-  who disable proactive cards keep checks and target alerts, but get no
-  new opportunities, reminders, or emails.
-- **Email**: per-event Resend templates gated only by per-user
-  preferences — every trigger sends while its kind stays on. The
-  scheduler has no session, so email goes only to the address stored on
-  the watch; every outcome (sent, failed, skipped with reason) is
-  recorded on the card or reminder.
-- **Reminders** are one-time revisit nudges — time-based, target-based, or
-  both — never predictions. They fire once, then stay done unless
-  re-activated.
-- **Chat** (`/api/chat` + Chat rail) answers follow-ups from stored data
-  first (prices, changes, deal status, shortlist compare — all offline),
-  then at most one grounded LLM call over retrieved context with
-  history-vs-current labeling, then an honest offline fallback. Threads
-  persist per user (20 threads × 50 messages, capped).
-- **Honesty boundaries**: no card, email, or chat answer is ever built
-  from failed fetches, unparseable pages, or stale data presented as
-  current; cards show evidence age and warn when it exceeds a week.
-
-## Limitations (Phase 1)
-
-- Prices are scraped from retailer page text via the search provider's Extract
-  API and labeled by evidence strength (`seen on page` vs `seen once` vs
-  unavailable). Always confirm on the retailer's page before buying.
-- Review ratings come from the same page text (rating value + ratings count
-  when the page shows them) and only from likely product pages — never from
-  category or search pages. Listings without a detectable rating show
-  "No rating found" rather than a guess.
-- Product photos come from retailer page media: product-photo namespaces are
-  preferred over site chrome, and CDN thumbnails are upscaled where the URL
-  pattern allows. Pages without a detectable product photo show a merchant
-  placeholder, and images that fail to load fall back to it automatically.
-- No review collection yet: pros/cons derive from verified facts (budget fit,
-  price evidence). The UI never shows fabricated reviews or ratings.
-- One search call covers all enabled domains; per-source failures are reported
-  per search, not per site connection.
-- WAIT verdicts require a concrete evidence-based reason; sale and launch
-  predictions are vetoed. When evidence is thin the app abstains with
-  INSUFFICIENT_EVIDENCE; when every option violates the budget or a
-  mandatory requirement it asks with NEEDS_CLARIFICATION.
-- Structured specifications are not extracted yet: requirement matching
-  works on listing titles and page text (numeric minimums with unit
-  normalization, token coverage otherwise), graded met / not-met / unknown.
-- Review intelligence works from search excerpts and extractable pages, not
-  complete review corpora: shopping-site review walls are often unreachable,
-  so coverage is partial by design. Identity matching is heuristic (model
-  codes parsed from titles), fashion items rarely match exactly, and the
-  system never reports review counts, percentages, or defect rates — only
-  distinct corroborating sources. The official verdict is never silently
-  changed by review evidence; rank impact is reported, not applied.
-- Out of scope for Phase 1: accounts, saved history, price alerts, financial
-  planning, direct retailer integrations.
-
-## Verification
-
-- `npm run typecheck`, `npm run lint`, `npm run build` — all green.
-- `npm test` — focused suite: intent rules, dedup, scoring/verdict/policy
-  logic, requirements, eligibility, evidence quality, weights, review
-  identity/retrieval/themes/quality/adjustment, route contracts, and a
-  14-scenario deterministic eval dataset (`lib/eval/`).
-- Live-verified during development: key-authenticated `muse exec`
-  (intent + verdict), Tavily search with domain restriction, Tavily extract
-  shape, and route error paths (400/503 with honest messages).
+The direction stays the same: every improvement must make verdicts more
+correct, better evidenced, or more honest about uncertainty — never more
+confident than the data allows.
