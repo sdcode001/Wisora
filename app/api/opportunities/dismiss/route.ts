@@ -4,7 +4,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 
 const BodySchema = z.object({ id: z.string().min(1).max(64) });
 
@@ -21,7 +21,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   const updated = await store.updateOpportunityStatus(
     user.sub,
     parsed.data.id,

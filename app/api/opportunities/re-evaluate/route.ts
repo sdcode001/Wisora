@@ -4,7 +4,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 import { detectionThresholdsFromEnv } from "../../../../lib/opportunities/detect";
 import { evaluateWatchForOpportunities } from "../../../../lib/opportunities/evaluate";
 import { runWatchCheck, tavilyPageFetcher } from "../../../../lib/prices/check";
@@ -35,7 +35,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 503 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   const existing = (await store.listOpportunities(user.sub)).find(
     (entry) => entry.id === parsed.data.id,
   );

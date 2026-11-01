@@ -3,7 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const user = sessionUserFromRequest(request);
@@ -13,7 +13,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const params = request.nextUrl.searchParams;
   const limitRaw = params.get("limit");
   const limit = limitRaw === null ? undefined : Number.parseInt(limitRaw, 10);
-  const alerts = await new FileMemoryStore().listAlerts(
+  const alerts = await getMemoryStore().listAlerts(
     user.sub,
     Number.isFinite(limit) ? limit : undefined,
   );

@@ -3,7 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 import { NewFeedbackSchema } from "../../../../lib/memory/records";
 
 function readLimit(request: NextRequest, fallback = 20): number {
@@ -20,7 +20,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (!user) {
     return unauthenticatedResponse();
   }
-  const feedback = await new FileMemoryStore().listFeedback(
+  const feedback = await getMemoryStore().listFeedback(
     user.sub,
     readLimit(request),
   );
@@ -44,7 +44,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const item = await new FileMemoryStore().saveFeedback(
+  const item = await getMemoryStore().saveFeedback(
     user.sub,
     parsed.data,
   );

@@ -104,7 +104,10 @@ alerts automatically.
 - **Auth:** Google OAuth — sign-in; all data namespaced per account.
 - **App:** Next.js 16 + React 19 + TypeScript (strict) + Zod runtime
   validation + Tailwind CSS.
-- **Storage:** JSON files under `data/` (gitignored) — no database server.
+- **Storage:** MongoDB when `MONGODB_URI` is set (required on serverless
+  hosts like Netlify, where the disk is read-only); otherwise local JSON
+  files under `data/` (gitignored) for development. Both implement the
+  same `MemoryStore` contract.
 - **Tests:** Vitest — 454 tests guarding the behaviors above.
 - **Discipline:** five runtime dependencies total. No agent frameworks, no
   vector databases, no MCP servers. Deterministic code decides; the model
@@ -144,6 +147,8 @@ npm run build && npm start   # production
 | `RESEND_API_KEY` | For email alerts | Sends price/availability/reminder emails (https://resend.com); without it, alerts are in-app only |
 | `RESEND_FROM` | For email alerts | Sender identity, e.g. `Wisora <alerts@yourdomain.com>` |
 | `WISORA_CHECK_INTERVAL_MINUTES` | No (default 240) | Background watch-check interval in minutes |
+| `MONGODB_URI` | Yes on serverless | MongoDB connection string — required on Netlify/Vercel (read-only disk); local dev falls back to JSON files without it |
+| `WISORA_MONGO_DB` | No (default wisora) | MongoDB database name |
 
 Anything else (`WISORA_MUSE_*` model/effort overrides and friends) is
 optional with sane defaults. See `.env.example`.

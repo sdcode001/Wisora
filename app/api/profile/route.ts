@@ -6,9 +6,9 @@ import {
   unreadableResponse,
 } from "../../../lib/auth/require-session";
 import {
-  FileMemoryStore,
   StoredDataError,
 } from "../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../lib/memory/get-store";
 import {
   applyGeneralPatch,
   createDefaultProfile,
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return unauthenticatedResponse();
   }
   try {
-    const profile = await new FileMemoryStore().getProfile(user.sub);
+    const profile = await getMemoryStore().getProfile(user.sub);
     return NextResponse.json({ profile });
   } catch (error) {
     if (error instanceof StoredDataError) {
@@ -53,7 +53,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   try {
     const base =
       (await store.getProfile(user.sub)) ??
@@ -83,6 +83,6 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
   if (!user) {
     return unauthenticatedResponse();
   }
-  const cleared = await new FileMemoryStore().clearProfile(user.sub);
+  const cleared = await getMemoryStore().clearProfile(user.sub);
   return NextResponse.json({ cleared });
 }

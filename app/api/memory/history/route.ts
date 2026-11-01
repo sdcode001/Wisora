@@ -3,7 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 
 /**
  * Clear saved decision history: decisions, feedback, and proposals.
@@ -15,6 +15,6 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
   if (!user) {
     return unauthenticatedResponse();
   }
-  const cleared = await new FileMemoryStore().clearHistory(user.sub);
+  const cleared = await getMemoryStore().clearHistory(user.sub);
   return NextResponse.json({ cleared });
 }

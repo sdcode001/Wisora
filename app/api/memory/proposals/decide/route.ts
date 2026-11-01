@@ -6,9 +6,9 @@ import {
   unreadableResponse,
 } from "../../../../../lib/auth/require-session";
 import {
-  FileMemoryStore,
   StoredDataError,
 } from "../../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../../lib/memory/get-store";
 import {
   applyProposal,
   ProposalError,
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   try {
     const existing = await store.listProposals(user.sub);
     const proposal = existing.find((item) => item.id === parsed.data.id);

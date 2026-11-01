@@ -5,9 +5,9 @@ import {
   unreadableResponse,
 } from "../../../../lib/auth/require-session";
 import {
-  FileMemoryStore,
   StoredDataError,
 } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 import { createDefaultProfile } from "../../../../lib/memory/profile";
 import { detectProposals } from "../../../../lib/memory/proposals";
 
@@ -22,7 +22,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (!user) {
     return unauthenticatedResponse();
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   try {
     const [profile, decisions, feedback, existing] = await Promise.all([
       store.getProfile(user.sub),

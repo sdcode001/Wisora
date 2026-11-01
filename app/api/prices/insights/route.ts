@@ -3,7 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 import { summarizeHistory, type PriceStats } from "../../../../lib/prices/history";
 import type { PriceObservation } from "../../../../lib/prices/observation";
 
@@ -33,7 +33,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   const insights: Record<
     string,
     {

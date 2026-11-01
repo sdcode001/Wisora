@@ -3,7 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../../lib/memory/get-store";
 import { NewSavedProductSchema } from "../../../../../lib/memory/records";
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -11,7 +11,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (!user) {
     return unauthenticatedResponse();
   }
-  const products = await new FileMemoryStore().listSavedProducts(user.sub);
+  const products = await getMemoryStore().listSavedProducts(user.sub);
   return NextResponse.json({ products });
 }
 
@@ -32,7 +32,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const product = await new FileMemoryStore().saveSavedProduct(
+  const product = await getMemoryStore().saveSavedProduct(
     user.sub,
     parsed.data,
   );
@@ -51,7 +51,7 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const deleted = await new FileMemoryStore().deleteSavedProduct(
+  const deleted = await getMemoryStore().deleteSavedProduct(
     user.sub,
     productId,
   );

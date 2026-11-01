@@ -3,7 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 import { NotificationSettingsPatchSchema } from "../../../../lib/memory/records";
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -11,7 +11,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (!user) {
     return unauthenticatedResponse();
   }
-  const settings = await new FileMemoryStore().getNotificationSettings(
+  const settings = await getMemoryStore().getNotificationSettings(
     user.sub,
   );
   return NextResponse.json({ settings });
@@ -30,7 +30,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const settings = await new FileMemoryStore().saveNotificationSettings(
+  const settings = await getMemoryStore().saveNotificationSettings(
     user.sub,
     parsed.data,
   );

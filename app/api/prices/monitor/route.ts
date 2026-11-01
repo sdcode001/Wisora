@@ -3,7 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 import {
   isMonitoringActive,
   monitorConfigFromEnv,
@@ -20,7 +20,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return unauthenticatedResponse();
   }
   const config = monitorConfigFromEnv();
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   const runs = await store.listMonitorRuns(1);
   return NextResponse.json({
     monitoring: {

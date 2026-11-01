@@ -3,7 +3,7 @@ import { z } from "zod";
 import { CategorySchema, enabledSourcesFor, SOURCES } from "../../../config/sources";
 import { sessionUserFromRequest } from "../../../lib/auth/require-session";
 import { resolveIntent } from "../../../lib/intent/service";
-import { FileMemoryStore } from "../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../lib/memory/get-store";
 import {
   evaluateObservationsForUser,
   recordProductPrices,
@@ -116,7 +116,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   // Price history builds from normal use: persist fresh prices, then check
   // the signed-in user's watches against them. Neither step may fail search.
   try {
-    const store = new FileMemoryStore();
+    const store = getMemoryStore();
     const observations = await recordProductPrices(store, products, "search");
     const user = sessionUserFromRequest(request);
     if (user && observations.length > 0) {

@@ -5,7 +5,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../lib/memory/get-store";
 import { OpportunityKindSchema } from "../../../lib/opportunities/schema";
 
 const QuerySchema = z.object({
@@ -38,7 +38,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
   }
   const { status, kind, category, limit } = parsed.data;
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   const all = await store.listOpportunities(user.sub);
   const filtered = all.filter(
     (entry) =>

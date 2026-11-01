@@ -21,10 +21,11 @@ export const MEMORY_TEST_USER = {
   picture: null,
 };
 
-/** Call once per test file to isolate SESSION_SECRET/WISORA_DATA_DIR. */
+/** Call once per test file to isolate store env from the real backend. */
 export function setupMemoryEnv(): void {
   const savedSecret = process.env.SESSION_SECRET;
   const savedDataDir = process.env.WISORA_DATA_DIR;
+  const savedMongoUri = process.env.MONGODB_URI;
   afterEach(() => {
     if (savedSecret === undefined) {
       delete process.env.SESSION_SECRET;
@@ -36,12 +37,19 @@ export function setupMemoryEnv(): void {
     } else {
       process.env.WISORA_DATA_DIR = savedDataDir;
     }
+    if (savedMongoUri === undefined) {
+      delete process.env.MONGODB_URI;
+    } else {
+      process.env.MONGODB_URI = savedMongoUri;
+    }
   });
 }
 
 /** Point the file store at a fresh temp dir and enable test sessions. */
 export async function setupTempMemoryDir(): Promise<string> {
   process.env.SESSION_SECRET = "test-secret";
+  // Route tests must never touch a real Mongo even if the shell exports one.
+  delete process.env.MONGODB_URI;
   const dir = await mkdtemp(path.join(tmpdir(), "wisora-memory-api-"));
   process.env.WISORA_DATA_DIR = dir;
   return dir;

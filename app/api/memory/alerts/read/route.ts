@@ -4,7 +4,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../../lib/memory/get-store";
 
 const BodySchema = z.object({
   ids: z.array(z.string().min(1).max(64)).max(100).optional(),
@@ -24,7 +24,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const marked = await new FileMemoryStore().markAlertsRead(
+  const marked = await getMemoryStore().markAlertsRead(
     user.sub,
     parsed.data.all ? "all" : (parsed.data.ids ?? []),
   );

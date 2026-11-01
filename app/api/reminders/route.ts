@@ -5,9 +5,9 @@ import {
   unauthenticatedResponse,
 } from "../../../lib/auth/require-session";
 import {
-  FileMemoryStore,
   RemindersFullError,
 } from "../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../lib/memory/get-store";
 import {
   NewReminderSchema,
   ReminderUpdateSchema,
@@ -32,7 +32,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   const reminders = await store.listReminders(user.sub);
   const filtered =
     parsed.data.status === "all"
@@ -57,7 +57,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   try {
     const reminder = await store.saveReminder(user.sub, parsed.data);
     return NextResponse.json({ reminder });
@@ -94,7 +94,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const reminder = await new FileMemoryStore().updateReminder(
+  const reminder = await getMemoryStore().updateReminder(
     user.sub,
     parsed.data,
   );
@@ -119,6 +119,6 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const deleted = await new FileMemoryStore().deleteReminder(user.sub, id);
+  const deleted = await getMemoryStore().deleteReminder(user.sub, id);
   return NextResponse.json({ deleted });
 }

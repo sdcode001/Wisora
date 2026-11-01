@@ -3,14 +3,14 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const user = sessionUserFromRequest(request);
   if (!user) {
     return unauthenticatedResponse();
   }
-  const threads = await new FileMemoryStore().listChatThreads(user.sub);
+  const threads = await getMemoryStore().listChatThreads(user.sub);
   return NextResponse.json({ threads });
 }
 
@@ -26,6 +26,6 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const deleted = await new FileMemoryStore().deleteChatThread(user.sub, id);
+  const deleted = await getMemoryStore().deleteChatThread(user.sub, id);
   return NextResponse.json({ deleted });
 }

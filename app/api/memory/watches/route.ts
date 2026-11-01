@@ -5,9 +5,9 @@ import {
 } from "../../../../lib/auth/require-session";
 import {
   DuplicateWatchError,
-  FileMemoryStore,
   WatchlistFullError,
 } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 import { evaluateWatchForOpportunities } from "../../../../lib/opportunities/evaluate";
 import { evaluateObservationsForUser } from "../../../../lib/prices/check";
 import { summarizeHistory, targetRealismNote } from "../../../../lib/prices/history";
@@ -22,7 +22,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (!user) {
     return unauthenticatedResponse();
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   const [watches, alerts] = await Promise.all([
     store.listWatches(user.sub),
     store.listAlerts(user.sub),
@@ -69,7 +69,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   try {
     const watch = await store.saveWatch(user.sub, {
       ...parsed.data,
@@ -144,7 +144,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   // notifyEmail stays server-managed (always the signed-in account).
   const { notifyEmail: _ignored, ...update } = parsed.data;
   void _ignored;
-  const watch = await new FileMemoryStore().updateWatch(user.sub, {
+  const watch = await getMemoryStore().updateWatch(user.sub, {
     ...update,
     id: parsed.data.id,
   });
@@ -169,6 +169,6 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const deleted = await new FileMemoryStore().deleteWatch(user.sub, id);
+  const deleted = await getMemoryStore().deleteWatch(user.sub, id);
   return NextResponse.json({ deleted });
 }

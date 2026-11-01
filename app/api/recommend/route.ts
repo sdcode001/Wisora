@@ -10,7 +10,7 @@ import { resolveIntent } from "../../../lib/intent/service";
 import { IntentSchema } from "../../../lib/intent/types";
 import { getReasonProvider } from "../../../lib/llm/provider";
 import { sessionUserFromRequest } from "../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../lib/memory/get-store";
 import { resolvePersonalization } from "../../../lib/memory/personalize";
 import { PROFILE_KEY_PREFIX } from "../../../lib/memory/profile";
 import {
@@ -271,7 +271,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   // Price history builds from normal use: persist fresh prices, then check
   // the signed-in user's watches against them. Neither step may fail this.
   try {
-    const store = new FileMemoryStore();
+    const store = getMemoryStore();
     const observations = await recordProductPrices(
       store,
       ranked.map((entry) => entry.product),

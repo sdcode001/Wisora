@@ -6,7 +6,7 @@ import {
 } from "../../../lib/auth/require-session";
 import { respondToChat } from "../../../lib/chat/service";
 import { getLlmProvider } from "../../../lib/llm/provider";
-import { FileMemoryStore } from "../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../lib/memory/get-store";
 
 const BodySchema = z.object({
   threadId: z.string().min(1).max(64).nullable().optional(),
@@ -27,7 +27,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   if (parsed.data.threadId) {
     const existing = await store.getChatThread(user.sub, parsed.data.threadId);
     if (!existing) {

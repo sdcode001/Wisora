@@ -3,7 +3,7 @@ import {
   sessionUserFromRequest,
   unauthenticatedResponse,
 } from "../../../../../lib/auth/require-session";
-import { FileMemoryStore } from "../../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../../lib/memory/get-store";
 import { NewSavedComparisonSchema } from "../../../../../lib/memory/records";
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -12,7 +12,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return unauthenticatedResponse();
   }
   const comparisons =
-    await new FileMemoryStore().listSavedComparisons(user.sub);
+    await getMemoryStore().listSavedComparisons(user.sub);
   return NextResponse.json({ comparisons });
 }
 
@@ -33,7 +33,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const comparison = await new FileMemoryStore().saveSavedComparison(
+  const comparison = await getMemoryStore().saveSavedComparison(
     user.sub,
     parsed.data,
   );
@@ -52,7 +52,7 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const deleted = await new FileMemoryStore().deleteSavedComparison(
+  const deleted = await getMemoryStore().deleteSavedComparison(
     user.sub,
     id,
   );

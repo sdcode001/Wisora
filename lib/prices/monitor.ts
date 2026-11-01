@@ -1,5 +1,5 @@
 import type { MemoryStore } from "../memory/store";
-import { FileMemoryStore } from "../memory/file-store";
+import { getMemoryStore } from "../memory/get-store";
 import {
   detectionThresholdsFromEnv,
   type DetectionThresholds,
@@ -334,7 +334,7 @@ export function startMonitoring(): void {
     return;
   }
   const config = monitorConfigFromEnv();
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   const notifier = notifierFromEnv();
   const tick = (): void => {
     if (running) {

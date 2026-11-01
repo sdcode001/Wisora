@@ -10,9 +10,9 @@ import {
   unreadableResponse,
 } from "../../../../lib/auth/require-session";
 import {
-  FileMemoryStore,
   StoredDataError,
 } from "../../../../lib/memory/file-store";
+import { getMemoryStore } from "../../../../lib/memory/get-store";
 import {
   applyCategoryPatch,
   createDefaultProfile,
@@ -60,7 +60,7 @@ export async function GET(
     return resolved.response;
   }
   try {
-    const profile = await new FileMemoryStore().getProfile(user.sub);
+    const profile = await getMemoryStore().getProfile(user.sub);
     return NextResponse.json({
       category: resolved.category,
       preferences: profile?.categories[resolved.category] ?? null,
@@ -107,7 +107,7 @@ export async function PUT(
       { status: 400 },
     );
   }
-  const store = new FileMemoryStore();
+  const store = getMemoryStore();
   try {
     const now = new Date().toISOString();
     const provenance = envelope.data.provenance ?? "explicit";
