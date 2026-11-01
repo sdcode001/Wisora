@@ -1,4 +1,5 @@
 # Wisora — Buy With Evidence, Not Anxiety
+<img width="1275" height="612" alt="Screenshot 2026-11-02 at 4 00 47 AM" src="https://github.com/user-attachments/assets/614c27e4-c3dd-4f35-ba80-11b695381c0a" />
 
 ## Goal
 
@@ -36,6 +37,7 @@ code scores, detects, and calculates; the model interprets and synthesizes
 — never invents products, prices, or reviews.
 
 ## How It Works — End to End
+<img width="3274" height="2856" alt="mermaid-diagram" src="https://github.com/user-attachments/assets/c99393aa-02fc-4c5f-ba41-a5973c82911e" />
 
 **Search & verdict.** Enter a request like "laptop under ₹90,000 for .NET
 development." Wisora interprets the intent, gathers requirements through
