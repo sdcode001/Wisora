@@ -1,4 +1,7 @@
 # Wisora — Buy With Evidence, Not Anxiety
+
+**Live:** https://wisoraai.netlify.app/
+
 <img width="1275" height="612" alt="Screenshot 2026-11-02 at 4 00 47 AM" src="https://github.com/user-attachments/assets/614c27e4-c3dd-4f35-ba80-11b695381c0a" />
 
 ## Goal
