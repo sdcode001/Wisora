@@ -130,18 +130,18 @@ npm run build && npm start   # production
 
 ## Required Environment
 
-Only four values are required in `.env`:
-
-| Variable | Purpose | Where to get it |
+| Variable | Required | Purpose |
 |---|---|---|
-| `META_API_KEY` | Meta Model API key for all interpretation | Meta developer console |
-| `TAVILY_API_KEY` | Live product + review search | https://tavily.com |
-| `GOOGLE_OAUTH_CLIENT_ID` | Google sign-in (Web application type; register `http://localhost:3000` as an authorized JavaScript origin) | https://console.cloud.google.com/apis/credentials |
-| `SESSION_SECRET` | Signs session cookies (`openssl rand -base64 32`) | Generate locally |
+| `META_API_KEY` | Yes | Meta Model API key for all interpretation (Meta developer console) |
+| `TAVILY_API_KEY` | Yes | Live product + review search (https://tavily.com) |
+| `GOOGLE_OAUTH_CLIENT_ID` | Yes | Google sign-in — Web application type; register `http://localhost:3000` as an authorized JavaScript origin (https://console.cloud.google.com/apis/credentials) |
+| `SESSION_SECRET` | Yes | Signs session cookies — generate with `openssl rand -base64 32` |
+| `RESEND_API_KEY` | For email alerts | Sends price/availability/reminder emails (https://resend.com); without it, alerts are in-app only |
+| `RESEND_FROM` | For email alerts | Sender identity, e.g. `Wisora <alerts@yourdomain.com>` |
+| `WISORA_CHECK_INTERVAL_MINUTES` | No (default 240) | Background watch-check interval in minutes |
 
-Everything else is optional with sane defaults: `RESEND_*` (without it,
-alerts are in-app only), `WISORA_CHECK_INTERVAL_MINUTES` (default 240),
-`WISORA_MUSE_*` model/effort overrides. See `.env.example`.
+Anything else (`WISORA_MUSE_*` model/effort overrides and friends) is
+optional with sane defaults. See `.env.example`.
 
 ## Future Scope
 
