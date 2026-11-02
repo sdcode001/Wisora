@@ -3,6 +3,7 @@ import type { Intent } from "../intent/types";
 import type { LlmProvider, LlmRequirements } from "../llm/provider";
 import {
   decideClarification,
+  exclusionsFromAnswer,
   extractExclusionRules,
   extractRequirements,
 } from "./extract";
@@ -102,7 +103,7 @@ describe("extractRequirements", () => {
     );
     expect(reqs.must).toEqual([]);
     expect(reqs.exclude.map((r) => r.key)).toEqual(["webcam"]);
-    expect(questions).toEqual([]);
+    expect(questions.map((q) => q.id)).toEqual(["use", "avoid"]);
   });
 
   it("suppresses questions once answers arrive", async () => {
@@ -126,5 +127,80 @@ describe("decideClarification", () => {
 
   it("asks nothing when everything is clear", () => {
     expect(decideClarification(intent(), requirements())).toEqual([]);
+  });
+
+  it("falls back to use/avoid questions without a model", () => {
+    expect(
+      decideClarification(intent(), requirements(), false).map((q) => q.id),
+    ).toEqual(["use", "avoid"]);
+  });
+
+  it("keeps category first, then use, without a model", () => {
+    expect(
+      decideClarification(
+        intent({ categoryConfidence: "low" }),
+        requirements(),
+        false,
+      ).map((q) => q.id),
+    ).toEqual(["category", "use"]);
+  });
+});
+
+describe("rule-based mode (no provider)", () => {
+  it("asks fallback questions instead of silently skipping", async () => {
+    const { questions } = await extractRequirements("laptop", intent(), {
+      provider: null,
+    });
+    expect(questions.map((q) => q.id)).toEqual(["use", "avoid"]);
+  });
+
+  it("incorporates fallback answers into requirements", async () => {
+    const { requirements: reqs, questions } = await extractRequirements(
+      "laptop",
+      intent(),
+      {
+        provider: null,
+        answers: [
+          { questionId: "use", value: "coding and travel" },
+          { questionId: "avoid", value: "Sony, refurbished" },
+        ],
+      },
+    );
+    expect(questions).toEqual([]);
+    expect(reqs.useContext).toBe("coding and travel");
+    expect(reqs.exclude.map((r) => r.key)).toEqual([
+      "sony",
+      "refurbished",
+    ]);
+  });
+
+  it("treats a 'none' avoid answer as no exclusions", async () => {
+    const { requirements: reqs } = await extractRequirements(
+      "laptop",
+      intent(),
+      {
+        provider: null,
+        answers: [
+          { questionId: "use", value: "coding" },
+          { questionId: "avoid", value: "none" },
+        ],
+      },
+    );
+    expect(reqs.exclude).toEqual([]);
+  });
+});
+
+describe("exclusionsFromAnswer", () => {
+  it("splits comma- and and-separated labels", () => {
+    expect(exclusionsFromAnswer("Sony, refurbished and open-box").map((r) => r.key)).toEqual([
+      "sony",
+      "refurbished",
+      "open-box",
+    ]);
+  });
+
+  it("drops empties, stoplist words, and bare 'none'", () => {
+    expect(exclusionsFromAnswer("none")).toEqual([]);
+    expect(exclusionsFromAnswer("a, the, idea")).toEqual([]);
   });
 });

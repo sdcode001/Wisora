@@ -15,7 +15,8 @@ import {
 } from "../requirements/types";
 import { formatInr } from "../text/format";
 import { contentTokens } from "../text/tokens";
-import { FileMemoryStore, StoredDataError } from "./file-store";
+import { StoredDataError } from "./file-store";
+import { getMemoryStore } from "./get-store";
 import {
   PROFILE_KEY_PREFIX,
   type CategoryPreferences,
@@ -464,7 +465,7 @@ export interface ResolvedPersonalization extends PersonalizationResult {
 export async function resolvePersonalization(
   request: Request,
   opts: PersonalizationRequest,
-  store: MemoryStore = new FileMemoryStore(),
+  store: MemoryStore = getMemoryStore(),
 ): Promise<ResolvedPersonalization> {
   const disabled = (
     reason: PersonalizationDisabledReason,

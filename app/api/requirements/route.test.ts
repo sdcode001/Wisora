@@ -39,7 +39,9 @@ test("extracts rules requirements without live calls", async () => {
   expect(body.requirements.category).toBe("electronics");
   expect(body.requirements.must).toEqual([]);
   expect(body.requirements.exclude.map((r) => r.key)).toEqual(["webcam"]);
-  expect(body.questions).toEqual([]);
+  expect(
+    (body.questions as Array<{ id: string }>).map((q) => q.id),
+  ).toEqual(["use", "avoid"]);
   expect(body.suggestedCategory).toBeNull();
 });
 

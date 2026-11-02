@@ -35,6 +35,34 @@ function dedupeByKey(items: Requirement[]): Requirement[] {
   });
 }
 
+/**
+ * Parse a free-text "what to avoid" answer into exclusion requirements.
+ * Answers are comma- or "and"-separated labels ("Sony, refurbished"),
+ * each becoming one exclusion — the deterministic counterpart to the
+ * model's exclusion extraction.
+ */
+export function exclusionsFromAnswer(value: string): Requirement[] {
+  const labels = value
+    .split(/[,;]|\band\b/i)
+    .map((part) => part.trim().replace(/\s+/g, " "))
+    .filter(
+      (label) =>
+        label.length >= 2 &&
+        label.length <= 40 &&
+        !EXCLUSION_STOPLIST.test(label) &&
+        !/^(?:a|an|the|it|that|this|none|nothing|no)$/i.test(label),
+    );
+  return dedupeByKey(
+    labels.slice(0, 5).map((label) => ({
+      key: slugify(label),
+      label,
+      kind: "exclude" as const,
+      importance: 1,
+      evidence: value.trim().slice(0, 120),
+    })),
+  );
+}
+
 export function extractExclusionRules(query: string): Requirement[] {
   const found: Requirement[] = [];
   for (const re of EXCLUSION_RES) {
@@ -91,13 +119,22 @@ export async function extractRequirements(
       llm = null;
     }
   }
+  // Rule-based incorporation for answers to the fallback questions below.
+  // With a model, clarifications ride along in the prompt instead.
+  const answerOf = (id: string): string | undefined =>
+    options.answers
+      ?.find((a) => a.questionId === id)
+      ?.value.trim() || undefined;
+  const ruleUseContext = llm ? undefined : answerOf("use")?.slice(0, 300);
+  const ruleExcludes = llm ? [] : exclusionsFromAnswer(answerOf("avoid") ?? "");
   const requirements = RequirementSetSchema.parse({
     category: intent.category,
-    useContext: llm?.useContext ?? undefined,
+    useContext: llm?.useContext ?? ruleUseContext,
     must: (llm?.must ?? []).map((r) => ({ ...r, kind: "must" as const, importance: 1 })),
     want: (llm?.want ?? []).map((r) => ({ ...r, kind: "want" as const })),
     exclude: dedupeByKey([
       ...rules,
+      ...ruleExcludes,
       ...(llm?.exclude ?? []).map((r) => ({
         ...r,
         kind: "exclude" as const,
@@ -108,13 +145,14 @@ export async function extractRequirements(
   });
   const questions = options.answers?.length
     ? []
-    : decideClarification(intent, requirements);
+    : decideClarification(intent, requirements, llm !== null);
   return { requirements, questions };
 }
 
 export function decideClarification(
   intent: Intent,
   requirements: RequirementSet,
+  llmAvailable = true,
 ): ClarificationQuestion[] {
   const questions: ClarificationQuestion[] = [];
   if (intent.categoryConfidence === "low") {
@@ -128,6 +166,25 @@ export function decideClarification(
   const first = requirements.unanswered[0];
   if (first && questions.length < 2) {
     questions.push({ id: "q0", prompt: first, freeText: true });
+  }
+  if (!llmAvailable) {
+    // The model builds follow-ups from `unanswered`; without it, ask the
+    // two highest-value questions directly so rule-based mode still
+    // clarifies instead of silently skipping.
+    if (questions.length < 2) {
+      questions.push({
+        id: "use",
+        prompt: "What will you mainly use it for?",
+        freeText: true,
+      });
+    }
+    if (questions.length < 2) {
+      questions.push({
+        id: "avoid",
+        prompt: "Any brands or features to avoid? (comma-separated, or 'none')",
+        freeText: true,
+      });
+    }
   }
   return questions.slice(0, 2);
 }

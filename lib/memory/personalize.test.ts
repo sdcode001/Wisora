@@ -1,14 +1,22 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
+import { createSession, SESSION_COOKIE } from "../auth/session";
 import { matchRequirement } from "../eligibility/filter";
 import type { Intent } from "../intent/types";
 import { DEFAULT_WEIGHTS } from "../recommend/weights";
 import type { RequirementSet } from "../requirements/types";
+import { getMemoryStore } from "./get-store";
 import {
   personalizeRequest,
+  resolvePersonalization,
   STORED_WANT_IMPORTANCE,
   weightPresetFor,
   type PersonalizationInput,
 } from "./personalize";
+import type { MemoryStore } from "./store";
+
+vi.mock("./get-store", () => ({
+  getMemoryStore: vi.fn(),
+}));
 import {
   applyCategoryPatch,
   applyGeneralPatch,
@@ -395,4 +403,46 @@ test("other categories never leak into the current request", () => {
   expect(result.requirements.want).toEqual([]);
   expect(result.report.applied).toEqual([]);
   expect(result.report.skipped).toEqual([]);
+});
+
+test("resolvePersonalization reads the profile through the store factory", async () => {
+  // Regression: the default store bypassed getMemoryStore(), so production
+  // (MongoDB) searches read an empty local disk and ignored saved prefs.
+  const savedSecret = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = "test-secret";
+  try {
+    const profile = createDefaultProfile("user-1");
+    profile.categories.electronics = {
+      value: { category: "electronics", budgetInr: { max: 90000 } },
+      updatedAt: new Date().toISOString(),
+      provenance: "explicit",
+    };
+    const stub = { getProfile: vi.fn().mockResolvedValue(profile) };
+    vi.mocked(getMemoryStore).mockReturnValue(stub as unknown as MemoryStore);
+    const token = createSession(
+      { sub: "user-1", name: null, email: null, picture: null },
+      "test-secret",
+    );
+    const request = new Request("https://wisora.test/api/recommend", {
+      headers: { cookie: `${SESSION_COOKIE}=${token}` },
+    });
+    const resolved = await resolvePersonalization(request, {
+      intent: INTENT,
+      requirements: REQUIREMENTS,
+      category: "electronics",
+      weightsProvided: false,
+      personalize: true,
+    });
+    expect(getMemoryStore).toHaveBeenCalled();
+    expect(stub.getProfile).toHaveBeenCalledWith("user-1");
+    expect(resolved.report.enabled).toBe(true);
+    expect(resolved.report.budgetSource).toBe("profile");
+    expect(resolved.intent.budgetInr).toMatchObject({ max: 90000 });
+  } finally {
+    if (savedSecret === undefined) {
+      delete process.env.SESSION_SECRET;
+    } else {
+      process.env.SESSION_SECRET = savedSecret;
+    }
+  }
 });

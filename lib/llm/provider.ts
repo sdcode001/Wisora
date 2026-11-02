@@ -380,13 +380,152 @@ export class CliLlmProvider implements LlmProvider {
   }
 }
 
+export interface HttpLlmOptions {
+  model: string;
+  effort: string;
+  apiKey: string;
+  baseUrl?: string;
+  timeoutMs?: number;
+}
+
+export const DEFAULT_META_BASE_URL = "https://api.meta.ai/v1";
+
+const ChatCompletionsSchema = z.object({
+  choices: z
+    .array(
+      z.object({
+        message: z.object({ content: z.string().nullable() }),
+      }),
+    )
+    .min(1),
+});
+
+/**
+ * Direct HTTPS provider for the Meta model API (OpenAI-compatible
+ * chat-completions contract). Used where the `muse` CLI binary cannot
+ * run — serverless hosts like Netlify. Behavior matches CliLlmProvider:
+ * same prompts, same JSON extraction, same two-attempt policy.
+ */
+export class HttpLlmProvider implements LlmProvider {
+  readonly name = "meta-http";
+
+  get available(): boolean {
+    return this.opts.apiKey !== "";
+  }
+
+  private readonly opts: HttpLlmOptions;
+
+  constructor(opts: HttpLlmOptions) {
+    this.opts = opts;
+  }
+
+  private endpoint(): string {
+    const base = (this.opts.baseUrl ?? DEFAULT_META_BASE_URL).replace(
+      /\/+$/,
+      "",
+    );
+    return `${base}/chat/completions`;
+  }
+
+  private async runPrompt(prompt: string): Promise<unknown> {
+    let lastError: unknown = new Error("unreachable");
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await fetch(this.endpoint(), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.opts.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: this.opts.model,
+            messages: [{ role: "user", content: prompt }],
+            stream: false,
+            reasoning_effort: this.opts.effort,
+            response_format: { type: "json_object" },
+          }),
+          signal: AbortSignal.timeout(this.opts.timeoutMs ?? 60000),
+        });
+        if (!response.ok) {
+          const detail = (await response.text()).slice(0, 300);
+          throw new Error(
+            `meta http ${response.status}: ${detail || response.statusText}`,
+          );
+        }
+        const parsed = ChatCompletionsSchema.safeParse(
+          (await response.json()) as unknown,
+        );
+        const content = parsed.success
+          ? parsed.data.choices[0]?.message.content
+          : null;
+        if (!content) {
+          throw new Error("meta http response held no message content");
+        }
+        return extractJson(content);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  async extractIntent(query: string): Promise<LlmIntent> {
+    return LlmIntentSchema.parse(await this.runPrompt(buildIntentPrompt(query)));
+  }
+
+  async explainVerdict(request: ExplainVerdictRequest): Promise<LlmVerdict> {
+    return LlmVerdictSchema.parse(
+      await this.runPrompt(buildVerdictPrompt(request)),
+    );
+  }
+
+  async extractRequirements(
+    query: string,
+    category: string,
+  ): Promise<LlmRequirements> {
+    return LlmRequirementsSchema.parse(
+      await this.runPrompt(buildRequirementsPrompt(query, category)),
+    );
+  }
+
+  async extractReviewThemes(
+    input: ReviewThemeInput,
+  ): Promise<LlmReviewThemes> {
+    return LlmReviewThemesSchema.parse(
+      await this.runPrompt(buildReviewThemesPrompt(input)),
+    );
+  }
+
+  async answerGrounded(input: GroundedAnswerInput): Promise<LlmChatAnswer> {
+    return LlmChatAnswerSchema.parse(
+      await this.runPrompt(buildGroundedAnswerPrompt(input)),
+    );
+  }
+}
+
+export type LlmTransport = "cli" | "http";
+
+export function llmTransportFromEnv(): LlmTransport {
+  return process.env.WISORA_LLM_TRANSPORT === "http" ? "http" : "cli";
+}
+
 function buildProvider(effort: string, timeoutMs: number): LlmProvider | null {
   const apiKey = process.env.META_API_KEY;
   if (!apiKey) {
     return null;
   }
+  const model = process.env.WISORA_MUSE_MODEL ?? "muse-spark-1.3";
+  if (llmTransportFromEnv() === "http") {
+    return new HttpLlmProvider({
+      model,
+      effort,
+      apiKey,
+      baseUrl: process.env.WISORA_MUSE_BASE_URL,
+      timeoutMs,
+    });
+  }
   return new CliLlmProvider({
-    model: process.env.WISORA_MUSE_MODEL ?? "muse-spark-1.3",
+    model,
     effort,
     apiKey,
     bin: process.env.WISORA_MUSE_BIN,

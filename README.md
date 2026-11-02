@@ -99,6 +99,8 @@ alerts automatically.
 
 - **Model:** Meta Muse Spark (`muse-spark-1.3`) via the Meta Model API —
   all interpretation (intent, requirements, verdicts, review themes, chat).
+  Two transports, same prompts: the `muse` CLI locally (default), direct
+  HTTPS chat-completions on serverless (`WISORA_LLM_TRANSPORT=http`).
 - **Live search:** Tavily — product discovery and review-page reading.
 - **Email:** Resend — per-event alert delivery.
 - **Auth:** Google OAuth — sign-in; all data namespaced per account.
