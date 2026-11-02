@@ -1,10 +1,13 @@
 import { afterEach, expect, test, vi } from "vitest";
 import {
   DEFAULT_META_BASE_URL,
+  FallbackLlmProvider,
   HttpLlmProvider,
   getLlmProvider,
   getReasonProvider,
   llmTransportFromEnv,
+  parseLlmRequirements,
+  type LlmProvider,
 } from "./provider";
 
 afterEach(() => {
@@ -190,4 +193,122 @@ test("factory builds the selected transport, or null without a key", () => {
   process.env.WISORA_LLM_TRANSPORT = "http";
   expect(getLlmProvider()?.name).toBe("meta-http");
   expect(getReasonProvider()?.name).toBe("meta-http");
+});
+
+test("parseLlmRequirements salvages oversized and malformed model output", () => {
+  const parsed = parseLlmRequirements({
+    useContext: "  gaming  ",
+    must: [
+      { key: "ram-16gb", label: "16GB RAM" },
+      { key: "", label: "missing key" },
+      { label: "no key at all" },
+      "not-an-object",
+      { key: "a", label: "b" },
+      { key: "c", label: "d" },
+      { key: "e", label: "f" },
+      { key: "g", label: "h" },
+      { key: "overflow", label: "dropped by cap" },
+    ],
+    want: [{ key: "rgb", label: "RGB", importance: 99 }],
+    exclude: null,
+    unanswered: ["What screen size?", "", 42, "x".repeat(400)],
+  });
+  expect(parsed.useContext).toBe("gaming");
+  expect(parsed.must.map((r) => r.key)).toEqual([
+    "ram-16gb",
+    "a",
+    "c",
+    "e",
+    "g",
+  ]);
+  expect(parsed.want).toEqual([{ key: "rgb", label: "RGB", importance: 1 }]);
+  expect(parsed.exclude).toEqual([]);
+  expect(parsed.unanswered).toEqual(["What screen size?", "x".repeat(300)]);
+});
+
+test("parseLlmRequirements tolerates nulls and non-objects", () => {
+  expect(parseLlmRequirements(null)).toEqual({
+    useContext: undefined,
+    must: [],
+    want: [],
+    exclude: [],
+    unanswered: [],
+  });
+  expect(parseLlmRequirements("nope")).toMatchObject({
+    must: [],
+    want: [],
+    exclude: [],
+    unanswered: [],
+  });
+});
+
+test("extractRequirements resolves (not throws) on sloppy model JSON", async () => {
+  stubFetch(
+    chatResponse(
+      JSON.stringify({
+        useContext: null,
+        must: [],
+        want: [],
+        exclude: [],
+        unanswered: ["Q1?", "Q2?", "Q3?", "Q4-overflow"],
+      }),
+    ),
+  );
+  const provider = new HttpLlmProvider({
+    model: "muse-spark-1.3",
+    effort: "low",
+    apiKey: "secret-key",
+  });
+  const reqs = await provider.extractRequirements("laptop", "electronics");
+  expect(reqs.unanswered).toEqual(["Q1?", "Q2?", "Q3?"]);
+});
+
+function stubLlm(overrides: Partial<LlmProvider> = {}): LlmProvider {
+  return {
+    name: "stub",
+    available: true,
+    extractIntent: () => Promise.reject(new Error("unused")),
+    explainVerdict: () => Promise.reject(new Error("unused")),
+    extractRequirements: () => Promise.reject(new Error("unused")),
+    extractReviewThemes: () => Promise.reject(new Error("unused")),
+    answerGrounded: () => Promise.reject(new Error("unused")),
+    ...overrides,
+  };
+}
+
+test("falls back to HTTPS only when the CLI binary is missing", async () => {
+  const enoent = Object.assign(new Error("spawn muse ENOENT"), {
+    code: "ENOENT",
+  });
+  const primary = stubLlm({
+    name: "muse-exec",
+    extractIntent: () => Promise.reject(enoent),
+  });
+  const secondary = stubLlm({
+    name: "meta-http",
+    extractIntent: () =>
+      Promise.resolve({ category: "electronics", searchTerms: "laptop" }),
+  });
+  const provider = new FallbackLlmProvider(primary, secondary);
+  expect(provider.name).toBe("muse-exec");
+  await expect(provider.extractIntent("laptop")).resolves.toMatchObject({
+    category: "electronics",
+  });
+  expect(provider.name).toBe("meta-http");
+  // Sticks to the secondary afterwards.
+  await expect(provider.extractIntent("laptop")).resolves.toMatchObject({
+    category: "electronics",
+  });
+});
+
+test("does not fall back on model/auth errors", async () => {
+  const primary = stubLlm({
+    extractIntent: () => Promise.reject(new Error("meta http 401: bad key")),
+  });
+  const secondary = stubLlm({
+    extractIntent: () => Promise.reject(new Error("must not be called")),
+  });
+  const provider = new FallbackLlmProvider(primary, secondary);
+  await expect(provider.extractIntent("laptop")).rejects.toThrow("401");
+  expect(provider.name).toBe("stub");
 });

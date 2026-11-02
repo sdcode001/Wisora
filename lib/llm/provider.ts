@@ -43,6 +43,99 @@ export const LlmRequirementsSchema = z.object({
 });
 export type LlmRequirements = z.infer<typeof LlmRequirementsSchema>;
 
+const REQUIREMENT_CAPS = { must: 5, want: 6, exclude: 5, unanswered: 3 } as const;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function cleanText(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+function cleanBaseList(
+  value: unknown,
+  cap: number,
+): Array<{ key: string; label: string }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const out: Array<{ key: string; label: string }> = [];
+  for (const item of value) {
+    if (out.length >= cap) {
+      break;
+    }
+    const rec = asRecord(item);
+    const key = rec ? cleanText(rec.key, 60) : undefined;
+    const label = rec ? cleanText(rec.label, 120) : undefined;
+    if (key && label) {
+      out.push({ key, label });
+    }
+  }
+  return out;
+}
+
+function cleanWantList(value: unknown): LlmRequirements["want"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const out: LlmRequirements["want"] = [];
+  for (const item of value) {
+    if (out.length >= REQUIREMENT_CAPS.want) {
+      break;
+    }
+    const rec = asRecord(item);
+    const key = rec ? cleanText(rec.key, 60) : undefined;
+    const label = rec ? cleanText(rec.label, 120) : undefined;
+    if (!key || !label) {
+      continue;
+    }
+    const raw = rec?.importance;
+    const importance =
+      typeof raw === "number" && Number.isFinite(raw)
+        ? Math.min(1, Math.max(0, raw))
+        : 0.5;
+    out.push({ key, label, importance });
+  }
+  return out;
+}
+
+/**
+ * Lenient requirements parsing. The model authors the clarifying questions,
+ * so one malformed field (an extra array item, a missing key) must not
+ * discard the whole response and silently fall back to fixed questions.
+ * Strict shapes pass through; anything else is salvaged field-by-field.
+ */
+export function parseLlmRequirements(raw: unknown): LlmRequirements {
+  const strict = LlmRequirementsSchema.safeParse(raw);
+  if (strict.success) {
+    return strict.data;
+  }
+  const rec = asRecord(raw) ?? {};
+  const useContextRaw = rec.useContext;
+  return {
+    useContext:
+      typeof useContextRaw === "string"
+        ? cleanText(useContextRaw, 300)
+        : useContextRaw == null
+          ? useContextRaw
+          : undefined,
+    must: cleanBaseList(rec.must, REQUIREMENT_CAPS.must),
+    want: cleanWantList(rec.want),
+    exclude: cleanBaseList(rec.exclude, REQUIREMENT_CAPS.exclude),
+    unanswered: (Array.isArray(rec.unanswered) ? rec.unanswered : [])
+      .map((q) => cleanText(q, 300))
+      .filter((q): q is string => q !== undefined)
+      .slice(0, REQUIREMENT_CAPS.unanswered),
+  };
+}
+
 export const LlmReviewThemeSchema = z.object({
   theme: z.string().min(1).max(200),
   category: z.string().min(1).max(60),
@@ -360,7 +453,7 @@ export class CliLlmProvider implements LlmProvider {
     query: string,
     category: string,
   ): Promise<LlmRequirements> {
-    return LlmRequirementsSchema.parse(
+    return parseLlmRequirements(
       await this.runPrompt(buildRequirementsPrompt(query, category)),
     );
   }
@@ -483,7 +576,7 @@ export class HttpLlmProvider implements LlmProvider {
     query: string,
     category: string,
   ): Promise<LlmRequirements> {
-    return LlmRequirementsSchema.parse(
+    return parseLlmRequirements(
       await this.runPrompt(buildRequirementsPrompt(query, category)),
     );
   }
@@ -500,6 +593,82 @@ export class HttpLlmProvider implements LlmProvider {
     return LlmChatAnswerSchema.parse(
       await this.runPrompt(buildGroundedAnswerPrompt(input)),
     );
+  }
+}
+
+/**
+ * CLI first, HTTPS when the binary is missing. Serverless hosts like Netlify
+ * cannot run the `muse` binary, so a missing binary (ENOENT only) switches to
+ * direct HTTPS for the rest of the instance. Model, auth, and timeout errors
+ * still propagate so real failures stay visible instead of masking as a
+ * transport problem.
+ */
+export class FallbackLlmProvider implements LlmProvider {
+  get name(): string {
+    return this.useSecondary ? this.secondary.name : this.primary.name;
+  }
+
+  get available(): boolean {
+    return this.primary.available;
+  }
+
+  private readonly primary: LlmProvider;
+  private readonly secondary: LlmProvider;
+  private useSecondary = false;
+
+  constructor(primary: LlmProvider, secondary: LlmProvider) {
+    this.primary = primary;
+    this.secondary = secondary;
+  }
+
+  private static isMissingBinary(error: unknown): boolean {
+    return (
+      error instanceof Error &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ENOENT"
+    );
+  }
+
+  private async run<T>(fn: (provider: LlmProvider) => Promise<T>): Promise<T> {
+    if (!this.useSecondary) {
+      try {
+        return await fn(this.primary);
+      } catch (error) {
+        if (!FallbackLlmProvider.isMissingBinary(error)) {
+          throw error;
+        }
+        this.useSecondary = true;
+        console.warn(
+          "wisora: muse CLI not found; using Meta HTTPS transport",
+        );
+      }
+    }
+    return fn(this.secondary);
+  }
+
+  async extractIntent(query: string): Promise<LlmIntent> {
+    return this.run((provider) => provider.extractIntent(query));
+  }
+
+  async explainVerdict(request: ExplainVerdictRequest): Promise<LlmVerdict> {
+    return this.run((provider) => provider.explainVerdict(request));
+  }
+
+  async extractRequirements(
+    query: string,
+    category: string,
+  ): Promise<LlmRequirements> {
+    return this.run((provider) => provider.extractRequirements(query, category));
+  }
+
+  async extractReviewThemes(
+    input: ReviewThemeInput,
+  ): Promise<LlmReviewThemes> {
+    return this.run((provider) => provider.extractReviewThemes(input));
+  }
+
+  async answerGrounded(input: GroundedAnswerInput): Promise<LlmChatAnswer> {
+    return this.run((provider) => provider.answerGrounded(input));
   }
 }
 
@@ -524,14 +693,25 @@ function buildProvider(effort: string, timeoutMs: number): LlmProvider | null {
       timeoutMs,
     });
   }
-  return new CliLlmProvider({
-    model,
-    effort,
-    apiKey,
-    bin: process.env.WISORA_MUSE_BIN,
-    baseUrl: process.env.WISORA_MUSE_BASE_URL,
-    timeoutMs,
-  });
+  // CLI first (local dev) with automatic HTTPS fallback where the binary
+  // is missing (serverless prod), so the model works without extra config.
+  return new FallbackLlmProvider(
+    new CliLlmProvider({
+      model,
+      effort,
+      apiKey,
+      bin: process.env.WISORA_MUSE_BIN,
+      baseUrl: process.env.WISORA_MUSE_BASE_URL,
+      timeoutMs,
+    }),
+    new HttpLlmProvider({
+      model,
+      effort,
+      apiKey,
+      baseUrl: process.env.WISORA_MUSE_BASE_URL,
+      timeoutMs,
+    }),
+  );
 }
 
 export function getLlmProvider(): LlmProvider | null {

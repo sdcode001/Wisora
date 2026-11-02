@@ -115,7 +115,11 @@ export async function extractRequirements(
   if (provider?.available) {
     try {
       llm = await provider.extractRequirements(withAnswers, intent.category);
-    } catch {
+    } catch (error) {
+      console.error(
+        "wisora: requirements LLM failed; using rule-based fallback:",
+        error instanceof Error ? error.message : error,
+      );
       llm = null;
     }
   }
